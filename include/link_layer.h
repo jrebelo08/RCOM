@@ -4,8 +4,10 @@
 #ifndef _LINK_LAYER_H_
 #define _LINK_LAYER_H_
 
-#include <signal.h>
+#include <unistd.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <signal.h>
 
 typedef enum
 {

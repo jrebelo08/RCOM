@@ -42,7 +42,7 @@ int llopen(LinkLayer connectionParameters)
     enum State { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP_STATE };
     enum State state = START;
     
-    unsigned char buf[BUF_SIZE + 1] = {0}; // +1 space for the final '\0' char
+    char buf[BUF_SIZE + 1] = {0}; // +1 space for the final '\0' char
     int alarmCount = 0; 
     
     if(connectionParameters.role == LlRx){
@@ -96,7 +96,7 @@ int llopen(LinkLayer connectionParameters)
 
         // Sending UA Frame 
         if(state == STOP_STATE){
-            unsigned char buf_s[BUF_SIZE] = {0};
+            char buf_s[BUF_SIZE] = {0};
 
             // UA Frame
             buf_s[0] = 0x7E;
@@ -112,7 +112,7 @@ int llopen(LinkLayer connectionParameters)
     if(connectionParameters.role == LlTx) {
         while (STOP == FALSE && alarmCount < MAX_RETRIES) {
             if (!alarmEnabled) {
-                unsigned char buf_s[BUF_SIZE] = {0};
+                char buf_s[BUF_SIZE] = {0};
                 // SET FRAME
                 buf_s[0] = 0x7E;
                 buf_s[1] = 0x03;
