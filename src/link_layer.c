@@ -2,13 +2,24 @@
 
 #include "link_layer.h"
 #include "serial_port.h"
+
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
 #define BUF_SIZE 8
 #define FALSE 0
 #define TRUE 1
+#define MAX_RETRIES 3
 
 volatile int STOP = FALSE;
+int alarmEnabled = FALSE; 
+int alarmCount = 0;      
+
+void alarmHandler(int signal)
+{
+    alarmEnabled = FALSE;
+    alarmCount++;
+    printf("Alarm #%d\n", alarmCount);
+}
 
 ////////////////////////////////////////////////
 // LLOPEN
@@ -21,12 +32,20 @@ int llopen(LinkLayer connectionParameters)
         return -1;
     }
 
+    struct sigaction act = {0};
+    act.sa_handler = &alarmHandler;
+    if (sigaction(SIGALRM, &act, NULL) == -1) {
+        perror("sigaction");
+        exit(EXIT_FAILURE);
+    }
+
     enum State { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP_STATE };
     enum State state = START;
     unsigned char buf[BUF_SIZE + 1] = {0}; // +1 space for the final '\0' char
-
+    int alarmCount = 0; 
+    
     if(connectionParameters.role == LlRx){
-            // Loop for input
+            
         while (STOP == FALSE)
         {
             int bytes = readByte(buf); 
@@ -71,7 +90,7 @@ int llopen(LinkLayer connectionParameters)
                     break;
                 }
             }
-            sleep(10);
+            sleep(0.1);
         }
 
         // Sending UA Frame 
@@ -89,27 +108,31 @@ int llopen(LinkLayer connectionParameters)
         }
     }
 
-    if(connectionParameters.role == LlTx){
-        if(state == START){
-            unsigned char buf_s[BUF_SIZE] = {0};
-            // SET FRAME
-            buf_s[0] = 0x7E;
-            buf_s[1] = 0x03;
-            buf_s[2] = 0x03;
-            buf_s[3] = 0x00;
-            buf_s[4] = 0x7E;  
+    if(connectionParameters.role == LlTx) {
+        while (STOP == FALSE && alarmCount < MAX_RETRIES) {
+            if (!alarmEnabled) {
+                unsigned char buf_s[BUF_SIZE] = {0};
+                // SET FRAME
+                buf_s[0] = 0x7E;
+                buf_s[1] = 0x03;
+                buf_s[2] = 0x03;
+                buf_s[3] = 0x00;
+                buf_s[4] = 0x7E;  
 
-            int bytes_s = writeBytes(buf_s,BUF_SIZE);
-            printf("%d bytes written\n",bytes_s);
-        }
+                int bytes_s = writeBytes(buf_s, BUF_SIZE);
+                printf("%d bytes written\n", bytes_s);
 
-         while (STOP == FALSE)
-        {
-            int bytes = readByte(buf); 
-            if (bytes > 0)
-            {
-                switch (state)
-                {
+                alarm(3); // Set alarm for 3 seconds
+                alarmEnabled = TRUE;
+            }
+
+            int bytes = readByte(buf);
+            if (bytes > 0) {
+                alarm(0); 
+                alarmEnabled = FALSE; // Reset the alarm status
+                alarmCount = 0; // Reset the alarm count on successful read
+
+                switch (state) {
                 case START:
                     if (buf[0] == 0x7E) 
                         state = FLAG_RCV;
@@ -146,12 +169,16 @@ int llopen(LinkLayer connectionParameters)
                     STOP = TRUE;
                     break;
                 }
+            } else if (alarmEnabled == FALSE) {
+                alarmCount++; // Increment alarm count if no bytes are read
+                if (alarmCount >= MAX_RETRIES) {
+                    printf("Max alarms reached. Aborting.\n");
+                    return -1; 
+                }
             }
-            sleep(10);
         }
     }
-
-    return 1;
+    return 1; // Success
 }
 
 ////////////////////////////////////////////////
