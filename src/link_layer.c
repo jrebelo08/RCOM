@@ -12,7 +12,8 @@
 
 volatile int STOP = FALSE;
 int alarmEnabled = FALSE; 
-int alarmCount = 0;      
+int alarmCount = 0;
+int frame_number = 0;      
 
 void alarmHandler(int signal)
 {
@@ -207,11 +208,76 @@ int llopen(LinkLayer connectionParameters)
 ////////////////////////////////////////////////
 // LLWRITE
 ////////////////////////////////////////////////
-int llwrite(const unsigned char *buf, int bufSize)
-{
-    // TODO
+int llwrite(const unsigned char *buf, int bufSize) {
+    // Frame construction
+    int totalFrameSize = bufSize + 6; // Data size + header
+    unsigned char *frame = (unsigned char *)malloc(totalFrameSize); // Allocate memory
 
-    return 0;
+    // Constructing the frame
+    frame[0] = 0x7E; // Flag
+    frame[1] = 0x03; // Address
+    frame[2] = (frame_number == 0) ? 0x00 : 0x80; // Control
+    frame[3] = frame[1] ^ frame[2]; // BCC1
+
+    // BCC2 calculation
+    unsigned char bcc2 = 0; 
+    for (int i = 0; i < bufSize; i++) {
+        frame[i + 4] = buf[i]; // Copy data
+        bcc2 ^= buf[i]; // Calculate BCC2
+    }
+    frame[totalFrameSize - 2] = bcc2; // Insert BCC2
+    frame[totalFrameSize - 1] = 0x7E; // End flag
+
+    initializeAlarm();
+    // Sending frame and waiting for acknowledgment
+    alarmCount = 0;
+    while (alarmCount < MAX_RETRIES) {
+        writeBytes(frame, totalFrameSize); // Send frame
+        alarm(3); // Set alarm for 3 seconds
+        alarmEnabled = TRUE;
+
+        // Acknowledgment state machine
+        enum { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP } state = START;
+        unsigned char byte;
+
+        while (alarmEnabled) { // Loop until alarm goes off or acknowledgment is received
+            if (readByte(&byte) > 0) {
+                switch (state) {
+                    case START:
+                        if (byte == 0x7E) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == 0x03) state = A_RCV;
+                        else if (byte != 0x7E) state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == 0x07) state = C_RCV;
+                        else if (byte == 0x7E) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (0x03 ^ 0x07)) state = BCC_OK;
+                        else if (byte == 0x7E) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case BCC_OK:
+                        if (byte == 0x7E) {
+                            alarm(0); // Reset the alarm
+                            alarmEnabled = FALSE; // Acknowledgment received
+                            free(frame); // Free allocated memory
+                            return bufSize; // Successful write
+                        } else {
+                            state = START; // Unexpected byte, reset state
+                        }
+                        break;
+                }
+            } else if(alarmEnabled == FALSE){
+
+            }
+        }
+    }
+    free(frame); // Free allocated memory after attempts
+    return -1; // Failed to send
 }
 
 ////////////////////////////////////////////////
