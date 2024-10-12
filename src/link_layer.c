@@ -18,8 +18,10 @@
 // Control Field Constants
 #define CTRL_SET 0x03      // Control field for SET frame
 #define CTRL_UA 0x07       // Control field for UA frame
-#define CTRL_RR1 0x05       // Control field for RR (Receiver Ready)
-#define CTRL_REJ0 0x01      // Control field for REJ (Reject)
+#define CTRL_RR0 0X05      // Control fiel for RR0 frame 0
+#define CTRL_RR1 0x85       // Control field for RR1 frame 1 
+#define CTRL_REJ0 0x01      // Control field for REJ0 frame 0 
+#define CTRL_REJ1 0x81      // Control field for REJ1 frame 1 
 #define CTRL_DISC 0x0B     // Control field for DISC (Disconnect)
 #define CTRL_I_0 0x00      // Control field for I-frame with sequence number 0
 #define CTRL_I_1 0x40      // Control field for I-frame with sequence number 1
@@ -303,13 +305,28 @@ int llwrite(const unsigned char *buf, int bufSize) {
                         else if (byte != FLAG) state = START;
                         break;
                     case A_RCV:
-                        if (frame_number == 0 && byte == CTRL_RR1) {
+                        // Check for positive acknowledgment for frame_number 0
+                        if (frame_number == 0 && byte == CTRL_RR0) {
                             state = C_RCV;
                             reject = 0; // Positive acknowledgment
-                        } else if (frame_number == 1 && byte == CTRL_REJ0) {
+                        }
+                        // Check for negative acknowledgment for frame_number 0
+                        else if (frame_number == 0 && byte == CTRL_REJ0) {
                             state = C_RCV;
                             reject = 1; // Negative acknowledgment (REJ)
-                        } else if (byte == FLAG) {
+                        }
+                        // Check for positive acknowledgment for frame_number 1
+                        else if (frame_number == 1 && byte == CTRL_RR1) {
+                            state = C_RCV;
+                            reject = 0; // Positive acknowledgment
+                        }
+                        // Check for negative acknowledgment for frame_number 1
+                        else if (frame_number == 1 && byte == CTRL_REJ1) {
+                            state = C_RCV;
+                            reject = 1; // Negative acknowledgment (REJ)
+                        }
+                        // If FLAG is received, go back to FLAG_RCV
+                        else if (byte == FLAG) {
                             state = FLAG_RCV;
                         } else {
                             state = START;
