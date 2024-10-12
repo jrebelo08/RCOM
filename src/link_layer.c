@@ -32,7 +32,11 @@
 volatile int STOP = FALSE;
 int alarmEnabled = FALSE; 
 int alarmCount = 0;
-int frame_number = 0;      
+int frame_number = 0;
+LinkLayerRole role;      
+static int numFramesSent = 0;
+static int numRetransmissions = 0;
+static int numTimeouts = 0;
 
 void alarmHandler(int signal)
 {
@@ -50,32 +54,30 @@ void initializeAlarm() {
     }
 }
 
-void sendUAFrame() {
+void sendFrame(unsigned char controlByte, const char *frameType) {
     char buf_s[BUF_SIZE] = {0};
 
-    // UA Frame
-    buf_s[0] = FLAG; // Flag
-    buf_s[1] = ADDR_TX; // Address
-    buf_s[2] = CTRL_UA; // Control
-    buf_s[3] = ADDR_TX ^ CTRL_UA; // BCC
-    buf_s[4] = FLAG; // Flag
+    // Constructing the frame
+    buf_s[0] = FLAG;                  // Flag
+    buf_s[1] = ADDR_TX;               // Address
+    buf_s[2] = controlByte;           // Control
+    buf_s[3] = ADDR_TX ^ controlByte; // BCC
+    buf_s[4] = FLAG;                  // Flag
 
     int bytes_s = writeBytes(buf_s, BUF_SIZE);
-    printf("%d bytes written (UA Frame)\n", bytes_s);
+    printf("%d bytes written (%s Frame)\n", bytes_s, frameType);
+}
+
+void sendUAFrame() {
+    sendFrame(CTRL_UA, "UA");
 }
 
 void sendSETFrame() {
-    char buf_s[BUF_SIZE] = {0};
+    sendFrame(CTRL_SET, "SET");
+}
 
-    // SET Frame
-    buf_s[0] = FLAG; // Flag
-    buf_s[1] = ADDR_TX; // Address
-    buf_s[2] = CTRL_SET; // Control
-    buf_s[3] = ADDR_TX ^ CTRL_SET; // BCC
-    buf_s[4] = FLAG; // Flag
-
-    int bytes_s = writeBytes(buf_s, BUF_SIZE);
-    printf("%d bytes written (SET Frame)\n", bytes_s);
+void sendDISCFrame() {
+    sendFrame(CTRL_DISC, "DISC");
 }
 
 int llOpenRxStateMachine() {
@@ -196,7 +198,6 @@ int llOpenTxStateMachine() {
                 break;
             }
         } else if (alarmEnabled == FALSE) {
-            alarmCount++; // Increment alarm count if no bytes are read
             if (alarmCount >= MAX_RETRIES) {
                 printf("Max alarms reached. Aborting.\n");
                 return -1; 
@@ -211,6 +212,10 @@ int llOpenTxStateMachine() {
 ////////////////////////////////////////////////
 int llopen(LinkLayer connectionParameters)
 {
+    role = connectionParameters.role;
+    numRetransmissions = connectionParameters.nRetransmissions;
+    numTimeouts = connectionParameters.timeout;
+    
     if (openSerialPort(connectionParameters.serialPort,
                        connectionParameters.baudRate) < 0)
     {
@@ -388,10 +393,82 @@ int llread(unsigned char *packet)
 ////////////////////////////////////////////////
 // LLCLOSE
 ////////////////////////////////////////////////
-int llclose(int showStatistics)
-{
-    // TODO
+int llclose(int showStatistics) {
+    /* STOP = TRUE; // Stop processing frames
 
-    int clstat = closeSerialPort();
-    return clstat;
+    if (role == LlTx) {
+        // Send DISC Frame
+        sendDISCFrame();
+
+        // Wait for UA Frame
+        char buf[BUF_SIZE + 1] = {0}; // Buffer for incoming bytes
+
+        while (TRUE) {
+            // Set alarm for 3 seconds
+            alarm(3);
+
+            // Wait for incoming bytes
+            int bytes = readByte(buf);
+            alarm(0); // Reset the alarm if bytes are received
+
+            if (bytes > 0) {
+                if (buf[0] == FLAG) {
+                    if (buf[1] == ADDR_RX && buf[2] == CTRL_UA) {
+                        // Validate BCC
+                        if (buf[3] == (ADDR_RX ^ CTRL_UA)) {
+                            // Received UA Frame successfully
+                            printf("UA Frame received.\n");
+                            break; // Exit loop on successful reception
+                        }
+                    }
+                }
+            } else {
+                printf("Waiting for UA Frame...\n");
+            }
+        }
+
+    } else if (role == LlRx) {
+        // Wait for DISC Frame
+        char buf[BUF_SIZE + 1] = {0}; // Buffer for incoming bytes
+
+        while (TRUE) {
+            // Set alarm for 3 seconds
+            alarm(3);
+
+            // Wait for incoming bytes
+            int bytes = readByte(buf);
+            alarm(0); // Reset the alarm if bytes are received
+
+            if (bytes > 0) {
+                if (buf[0] == FLAG) {
+                    if (buf[1] == ADDR_TX && buf[2] == CTRL_DISC) {
+                        // Validate BCC
+                        if (buf[3] == (ADDR_TX ^ CTRL_DISC)) {
+                            // Received DISC Frame successfully
+                            printf("DISC Frame received. Sending UA Frame.\n");
+                            sendUAFrame(); // Send UA Frame in response
+                            break; // Exit loop on successful reception
+                        }
+                    }
+                }
+            } else {
+                printf("Waiting for DISC Frame...\n");
+            }
+        }
+    }
+
+    int closeStat = closeSerialPort(); 
+    if (closeStat < 0) {
+        printf("Failed to close the serial port.\n");
+        return -1; 
+    }
+
+    if (showStatistics) {
+        printf("Statistics:\n");
+        printf("Frames Sent: %d\n", numFramesSent);
+        printf("Retransmissions: %d\n", numRetransmissions);
+        printf("Timeouts: %d\n", numTimeouts);
+    }
+    */
+    return 1; 
 }
