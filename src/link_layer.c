@@ -5,7 +5,7 @@
 
 // MISC
 #define _POSIX_SOURCE 1 // POSIX compliant source
-#define BUF_SIZE 8
+#define BUF_SIZE 5
 #define FALSE 0
 #define TRUE 1
 #define MAX_RETRIES 3
