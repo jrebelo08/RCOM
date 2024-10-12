@@ -81,8 +81,7 @@ void sendDISCFrame() {
 }
 
 int llOpenRxStateMachine() {
-    enum State { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP_STATE };
-    enum State state = START;
+     LinkLayerState state = START;
     char buf[BUF_SIZE + 1] = {0}; // +1 for the final '\0' char
 
     STOP = FALSE;
@@ -140,8 +139,7 @@ int llOpenRxStateMachine() {
 }
 
 int llOpenTxStateMachine() {
-    enum State { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP_STATE };
-    enum State state = START;
+    LinkLayerState state = START;
     char buf[BUF_SIZE + 1] = {0}; // +1 for the final '\0' char
     int alarmCount = 0;
 
@@ -295,7 +293,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
         alarmEnabled = TRUE;
 
         // Acknowledgment state machine
-        enum { START, FLAG_RCV, A_RCV, C_RCV, BCC_OK, STOP_STATE } state = START;
+        LinkLayerState state = START;
         unsigned char byte;
         int reject = 0;
 
@@ -385,8 +383,13 @@ int llwrite(const unsigned char *buf, int bufSize) {
 ////////////////////////////////////////////////
 int llread(unsigned char *packet)
 {
-    // TODO
+    LinkLayerState state = START;
+    unsigned char byte;
 
+    while(state != STOP_READ){
+        if (readByte((char *) &byte) > 0) {
+        }
+    }   
     return 0;
 }
 
