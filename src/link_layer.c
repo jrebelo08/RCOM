@@ -34,6 +34,7 @@ int alarmEnabled = FALSE;
 int alarmCount = 0;
 int frame_number = 0;
 LinkLayerRole role;      
+int timeout = 0;
 static int numFramesSent = 0;
 static int numRetransmissions = 0;
 static int numTimeouts = 0;
@@ -65,6 +66,7 @@ void sendFrame(unsigned char controlByte, const char *frameType) {
     buf_s[4] = FLAG;                  // Flag
 
     int bytes_s = writeBytes(buf_s, BUF_SIZE);
+    numFramesSent++;
     printf("%d bytes written (%s Frame)\n", bytes_s, frameType);
 }
 
@@ -82,7 +84,7 @@ void sendDISCFrame() {
 
 int llOpenRxStateMachine() {
      LinkLayerState state = START;
-    char buf[BUF_SIZE + 1] = {0}; // +1 for the final '\0' char
+    char buf[BUF_SIZE + 1] = {0}; 
 
     STOP = FALSE;
 
@@ -127,36 +129,36 @@ int llOpenRxStateMachine() {
                 break;
             }
         }
-        usleep(100000); // microsecond precision
+        usleep(100000); 
     }
 
-    // Sending UA Frame 
     if (state == STOP_STATE) {
         sendUAFrame();
-        return 1; // Success
+        return 1; 
     }
-    return -1; // Failure
+    return -1; 
 }
 
 int llOpenTxStateMachine() {
     LinkLayerState state = START;
-    char buf[BUF_SIZE + 1] = {0}; // +1 for the final '\0' char
+    char buf[BUF_SIZE + 1] = {0}; 
     int alarmCount = 0;
 
     STOP = FALSE;
 
     while (STOP == FALSE && alarmCount < MAX_RETRIES) {
         if (!alarmEnabled) {
-            sendSETFrame(); // Sending SET Frame
-            alarm(3); // Set alarm for 3 seconds
+            sendSETFrame();
+            alarm(timeout); 
             alarmEnabled = TRUE;
+            numRetransmissions++;
         }
 
         int bytes = readByte(buf);
         if (bytes > 0) {
             alarm(0); 
-            alarmEnabled = FALSE; // Reset the alarm status
-            alarmCount = 0; // Reset on successful read
+            alarmEnabled = FALSE; 
+            alarmCount = 0; 
 
             switch (state) {
             case START:
@@ -195,14 +197,16 @@ int llOpenTxStateMachine() {
                 STOP = TRUE;
                 break;
             }
-        } else if (alarmEnabled == FALSE) {
-            if (alarmCount >= MAX_RETRIES) {
-                printf("Max alarms reached. Aborting.\n");
-                return -1; 
+        } else {
+            if (!alarmEnabled) {
+                numTimeouts++;
+                if (alarmCount >= MAX_RETRIES) {
+                    return -1; 
+                }
             }
         }
     }
-    return 1; // Success
+    return 1; 
 }
 
 ////////////////////////////////////////////////
@@ -212,7 +216,7 @@ int llopen(LinkLayer connectionParameters)
 {
     role = connectionParameters.role;
     numRetransmissions = connectionParameters.nRetransmissions;
-    numTimeouts = connectionParameters.timeout;
+    timeout = connectionParameters.timeout;
     
     if (openSerialPort(connectionParameters.serialPort,
                        connectionParameters.baudRate) < 0)
@@ -281,101 +285,95 @@ int llwrite(const unsigned char *buf, int bufSize) {
     unsigned char *stuffedFrame = byteStuffing(frame, frameSize, &stuffedSize);
     free(frame); // Free original frame memory
 
-    initializeAlarm(); // Initialize the alarm handler
+    initializeAlarm(); 
     alarmCount = 0;
 
     STOP = FALSE;
 
     while (STOP == FALSE && alarmCount < MAX_RETRIES) {
-        // Transmit the frame
+        // Transmit the frame to rx
         writeBytes((const char *)stuffedFrame, stuffedSize); // Send the stuffed frame
-        alarm(3); // Set alarm for 3 seconds
+        numFramesSent++;
+        alarm(timeout); 
         alarmEnabled = TRUE;
 
-        // Acknowledgment state machine
         LinkLayerState state = START;
         unsigned char byte;
         int reject = 0;
 
-        while (alarmEnabled) { // Loop until alarm goes off or acknowledgment is received
-            if (readByte((char *) &byte) > 0) {
-                switch (state) {
-                    case START:
-                        if (byte == FLAG) state = FLAG_RCV;
-                        break;
-                    case FLAG_RCV:
-                        if (byte == ADDR_TX) state = A_RCV;
-                        else if (byte != FLAG) state = START;
-                        break;
-                    case A_RCV:
-                        // Check for positive acknowledgment for frame_number 0
-                        if (frame_number == 0 && byte == CTRL_RR0) {
-                            state = C_RCV;
-                            reject = 0; // Positive acknowledgment
+        if (readByte((char *) &byte) > 0) {
+            switch (state) {
+                case START:
+                    if (byte == FLAG) state = FLAG_RCV;
+                    break;
+                case FLAG_RCV:
+                    if (byte == ADDR_TX) state = A_RCV;
+                    else if (byte != FLAG) state = START;
+                    break;
+                case A_RCV:
+                    if (frame_number == 0 && byte == CTRL_RR0) {
+                        state = C_RCV;
+                        reject = 0; 
+                    }
+                    else if (frame_number == 0 && byte == CTRL_REJ0) {
+                        state = C_RCV;
+                        reject = 1; 
+                        numRetransmissions++;
+                    }
+                    else if (frame_number == 1 && byte == CTRL_RR1) {
+                        state = C_RCV;
+                        reject = 0; 
+                    }
+                    else if (frame_number == 1 && byte == CTRL_REJ1) {
+                        state = C_RCV;
+                        reject = 1;
+                        numRetransmissions++;
+                    }
+                    else if (byte == FLAG) {
+                        state = FLAG_RCV;
+                    } else {
+                        state = START;
+                    }
+                    break;
+                case C_RCV:
+                    if (byte == (ADDR_TX ^ ((reject == 0) ? CTRL_RR1 : CTRL_REJ0))) {
+                        state = BCC_OK;
+                    } else if (byte == FLAG) {
+                        state = FLAG_RCV;
+                    } else {
+                        state = START;
+                    }
+                    break;
+                case BCC_OK:
+                    if (byte == FLAG) {
+                        if (reject == 0) {
+                            alarm(0); 
+                            alarmEnabled = FALSE; 
+                            free(stuffedFrame); 
+                            frame_number = 1 - frame_number; 
+                            state = STOP_STATE;
+                            return bufSize; // Successful write
+                        } else { 
+                            state = START; // Restart the loop for resending
                         }
-                        // Check for negative acknowledgment for frame_number 0
-                        else if (frame_number == 0 && byte == CTRL_REJ0) {
-                            state = C_RCV;
-                            reject = 1; // Negative acknowledgment (REJ)
-                        }
-                        // Check for positive acknowledgment for frame_number 1
-                        else if (frame_number == 1 && byte == CTRL_RR1) {
-                            state = C_RCV;
-                            reject = 0; // Positive acknowledgment
-                        }
-                        // Check for negative acknowledgment for frame_number 1
-                        else if (frame_number == 1 && byte == CTRL_REJ1) {
-                            state = C_RCV;
-                            reject = 1; // Negative acknowledgment (REJ)
-                        }
-                        // If FLAG is received, go back to FLAG_RCV
-                        else if (byte == FLAG) {
-                            state = FLAG_RCV;
-                        } else {
-                            state = START;
-                        }
-                        break;
-                    case C_RCV:
-                        if (byte == (ADDR_TX ^ ((reject == 0) ? CTRL_RR1 : CTRL_REJ0))) {
-                            state = BCC_OK;
-                        } else if (byte == FLAG) {
-                            state = FLAG_RCV;
-                        } else {
-                            state = START;
-                        }
-                        break;
-                    case BCC_OK:
-                        if (byte == FLAG) {
-                            if (reject == 0) { // Positive acknowledgment (RR)
-                                alarm(0); // Reset the alarm
-                                alarmEnabled = FALSE; // Acknowledgment received
-                                free(stuffedFrame); // Free allocated memory
-                                frame_number = 1 - frame_number; // Toggle frame number for next transmission
-                                state = STOP_STATE;
-                                return bufSize; // Successful write
-                            } else { // Negative acknowledgment (REJ)
-                                state = START; // Restart the loop for resending
-                            }
-                        } else {
-                            state = START; // Unexpected byte, reset state
-                        }
-                        break;
-                        case STOP_STATE:
-                            STOP = TRUE;
-                        break;
-                }
+                    } else {
+                        state = START; // Unexpected byte, reset state
+                    }
+                    break;
+                case STOP_STATE:
+                    STOP = TRUE;
+                break;
             }
         }
-
-        // Alarm triggered or maximum retries reached, retry transmission
         if (alarmCount >= MAX_RETRIES) {
-            printf("Max retries reached. Transmission failed.\n");
-            break; // Exit if maximum retries are reached
+            numTimeouts++;
+            STOP = TRUE;
+            break; 
         }
     }
 
-    free(stuffedFrame); // Free allocated memory after all attempts
-    return -1; // Failed to send after max retries
+    free(stuffedFrame); 
+    return -1; 
 }
 
 ////////////////////////////////////////////////
@@ -397,66 +395,166 @@ int llread(unsigned char *packet)
 // LLCLOSE
 ////////////////////////////////////////////////
 int llclose(int showStatistics) {
-    /* STOP = TRUE; // Stop processing frames
+    STOP = TRUE; // Stop processing frames
 
     if (role == LlTx) {
-        // Send DISC Frame
-        sendDISCFrame();
+        sendDISCFrame(); 
 
-        // Wait for UA Frame
-        char buf[BUF_SIZE + 1] = {0}; // Buffer for incoming bytes
+        LinkLayerState state = START;
+        unsigned char byte;
+        alarmCount = 0;
 
-        while (TRUE) {
-            // Set alarm for 3 seconds
-            alarm(3);
+        while (alarmCount < MAX_RETRIES) {
+            if (!alarmEnabled) {
+                alarm(timeout); 
+                alarmEnabled = TRUE;
+            }
 
-            // Wait for incoming bytes
-            int bytes = readByte(buf);
-            alarm(0); // Reset the alarm if bytes are received
+            if (readByte((char*)&byte) > 0) {
+                alarm(0); 
+                alarmEnabled = FALSE;
 
-            if (bytes > 0) {
-                if (buf[0] == FLAG) {
-                    if (buf[1] == ADDR_RX && buf[2] == CTRL_UA) {
-                        // Validate BCC
-                        if (buf[3] == (ADDR_RX ^ CTRL_UA)) {
-                            // Received UA Frame successfully
-                            printf("UA Frame received.\n");
-                            break; // Exit loop on successful reception
+                switch (state) {
+                    case START:
+                        if (byte == FLAG) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == ADDR_RX) state = A_RCV;
+                        else if (byte != FLAG) state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == CTRL_DISC) state = C_RCV;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (ADDR_RX ^ CTRL_DISC)) state = BCC_OK;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case BCC_OK:
+                        if (byte == FLAG) {
+                            state = STOP_STATE;
+                        } else {
+                            state = START;
                         }
-                    }
+                        break;
+                    case STOP_STATE:
+                        STOP = TRUE;
+                        break;
                 }
-            } else {
-                printf("Waiting for UA Frame...\n");
             }
         }
 
+        if (alarmCount >= MAX_RETRIES) {
+            numTimeouts++;
+            return -1;
+        }
+
+        sendUAFrame();
+
     } else if (role == LlRx) {
-        // Wait for DISC Frame
-        char buf[BUF_SIZE + 1] = {0}; // Buffer for incoming bytes
+        LinkLayerState state = START;
+        unsigned char byte;
+        alarmCount = 0;
 
-        while (TRUE) {
-            // Set alarm for 3 seconds
-            alarm(3);
-
-            // Wait for incoming bytes
-            int bytes = readByte(buf);
-            alarm(0); // Reset the alarm if bytes are received
-
-            if (bytes > 0) {
-                if (buf[0] == FLAG) {
-                    if (buf[1] == ADDR_TX && buf[2] == CTRL_DISC) {
-                        // Validate BCC
-                        if (buf[3] == (ADDR_TX ^ CTRL_DISC)) {
-                            // Received DISC Frame successfully
-                            printf("DISC Frame received. Sending UA Frame.\n");
-                            sendUAFrame(); // Send UA Frame in response
-                            break; // Exit loop on successful reception
-                        }
-                    }
-                }
-            } else {
-                printf("Waiting for DISC Frame...\n");
+        while (alarmCount < MAX_RETRIES) {
+            if (!alarmEnabled) {
+                alarm(timeout); 
+                alarmEnabled = TRUE;
             }
+
+            if (readByte((char*)&byte) > 0) {
+                alarm(0); 
+                alarmEnabled = FALSE;
+
+                switch (state) {
+                    case START:
+                        if (byte == FLAG) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == ADDR_TX) state = A_RCV;
+                        else if (byte != FLAG) state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == CTRL_DISC) state = C_RCV;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (ADDR_TX ^ CTRL_DISC)) state = BCC_OK;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case BCC_OK:
+                        if (byte == FLAG) {
+                            state = STOP_STATE;
+                        } else {
+                            state = START;
+                        }
+                        break;
+                    case STOP_STATE:
+                        STOP = TRUE;
+                        break;
+                }
+            }
+        }
+
+        if (alarmCount >= MAX_RETRIES) {
+            numTimeouts++;
+            return -1; 
+        }
+
+        sendDISCFrame();
+
+        state = START; 
+        alarmCount = 0;
+
+        while (alarmCount < MAX_RETRIES) {
+            if (!alarmEnabled) {
+                alarm(timeout); 
+                alarmEnabled = TRUE;
+            }
+
+            if (readByte((char*)&byte) > 0) {
+                alarm(0); 
+                alarmEnabled = FALSE;
+
+                switch (state) {
+                    case START:
+                        if (byte == FLAG) state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (byte == ADDR_TX) state = A_RCV;
+                        else if (byte != FLAG) state = START;
+                        break;
+                    case A_RCV:
+                        if (byte == CTRL_UA) state = C_RCV;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case C_RCV:
+                        if (byte == (ADDR_TX ^ CTRL_UA)) state = BCC_OK;
+                        else if (byte == FLAG) state = FLAG_RCV;
+                        else state = START;
+                        break;
+                    case BCC_OK:
+                        if (byte == FLAG) {
+                            state = STOP_STATE;
+                        } else {
+                            state = START;
+                        }
+                        break;
+                    case STOP_STATE:
+                        STOP = TRUE;
+                        break;
+                }
+            }
+        }
+        
+        if (alarmCount >= MAX_RETRIES) {
+            numTimeouts++;
+            return -1; 
         }
     }
 
@@ -472,6 +570,6 @@ int llclose(int showStatistics) {
         printf("Retransmissions: %d\n", numRetransmissions);
         printf("Timeouts: %d\n", numTimeouts);
     }
-    */
-    return 1; 
+
+    return 1;
 }
