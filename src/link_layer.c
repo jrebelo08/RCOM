@@ -83,7 +83,7 @@ void sendDISCFrame() {
 }
 
 int llOpenRxStateMachine() {
-     LinkLayerState state = START;
+    LinkLayerState state = START;
     char buf[BUF_SIZE + 1] = {0}; 
 
     STOP = FALSE;
@@ -129,7 +129,6 @@ int llOpenRxStateMachine() {
                 break;
             }
         }
-        usleep(100000); 
     }
 
     if (state == STOP_STATE) {
@@ -141,22 +140,19 @@ int llOpenRxStateMachine() {
 
 int llOpenTxStateMachine() {
     LinkLayerState state = START;
-    char buf[BUF_SIZE + 1] = {0}; 
+    char buf[BUF_SIZE + 1] = {0}; // +1 for the final '\0' char
     int alarmCount = 0;
 
     STOP = FALSE;
 
-    while (STOP == FALSE && alarmCount < retransmissions) {
-        if (!alarmEnabled) {
-            sendSETFrame();
-            alarm(timeout); 
-            alarmEnabled = TRUE;
-            numRetransmissions++;
-        }
+    sendSETFrame(); // Initially send the SET frame
+    alarm(3);       // Set alarm for 3 seconds
+    alarmEnabled = TRUE;
 
+    while (STOP == FALSE && alarmCount < retransmissions) {
         int bytes = readByte(buf);
         if (bytes > 0) {
-            alarm(0); 
+            alarm(0);
             alarmEnabled = FALSE; 
             alarmCount = 0; 
 
@@ -197,16 +193,18 @@ int llOpenTxStateMachine() {
                 STOP = TRUE;
                 break;
             }
-        } else {
-            if (!alarmEnabled) {
-                numTimeouts++;
-                if (alarmCount >= retransmissions) {
-                    return -1; 
-                }
+        } else if (alarmEnabled == FALSE) {
+            if (alarmCount >= retransmissions) {
+                printf("Max alarms reached. Aborting.\n");
+                return -1; 
             }
+
+            sendSETFrame();
+            alarm(3); 
+            alarmEnabled = TRUE;
         }
     }
-    return 1; 
+    return 1; // Success
 }
 
 ////////////////////////////////////////////////
