@@ -8,7 +8,6 @@
 #define BUF_SIZE 5
 #define FALSE 0
 #define TRUE 1
-#define MAX_RETRIES 3
 
 // Frame Control Constants
 #define FLAG 0x7E                     // Flag byte
@@ -35,6 +34,7 @@ int alarmCount = 0;
 int frame_number = 0;
 LinkLayerRole role;      
 int timeout = 0;
+int retransmissions = 0;
 static int numFramesSent = 0;
 static int numRetransmissions = 0;
 static int numTimeouts = 0;
@@ -146,7 +146,7 @@ int llOpenTxStateMachine() {
 
     STOP = FALSE;
 
-    while (STOP == FALSE && alarmCount < MAX_RETRIES) {
+    while (STOP == FALSE && alarmCount < retransmissions) {
         if (!alarmEnabled) {
             sendSETFrame();
             alarm(timeout); 
@@ -200,7 +200,7 @@ int llOpenTxStateMachine() {
         } else {
             if (!alarmEnabled) {
                 numTimeouts++;
-                if (alarmCount >= MAX_RETRIES) {
+                if (alarmCount >= retransmissions) {
                     return -1; 
                 }
             }
@@ -215,7 +215,7 @@ int llOpenTxStateMachine() {
 int llopen(LinkLayer connectionParameters)
 {
     role = connectionParameters.role;
-    numRetransmissions = connectionParameters.nRetransmissions;
+    retransmissions = connectionParameters.nRetransmissions;
     timeout = connectionParameters.timeout;
     
     if (openSerialPort(connectionParameters.serialPort,
@@ -290,7 +290,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
 
     STOP = FALSE;
 
-    while (STOP == FALSE && alarmCount < MAX_RETRIES) {
+    while (STOP == FALSE && alarmCount < retransmissions) {
         // Transmit the frame to rx
         writeBytes((const char *)stuffedFrame, stuffedSize); // Send the stuffed frame
         numFramesSent++;
@@ -365,7 +365,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
                 break;
             }
         }
-        if (alarmCount >= MAX_RETRIES) {
+        if (alarmCount >= retransmissions) {
             numTimeouts++;
             STOP = TRUE;
             break; 
@@ -404,7 +404,7 @@ int llclose(int showStatistics) {
         unsigned char byte;
         alarmCount = 0;
 
-        while (alarmCount < MAX_RETRIES) {
+        while (alarmCount < retransmissions) {
             if (!alarmEnabled) {
                 alarm(timeout); 
                 alarmEnabled = TRUE;
@@ -446,7 +446,7 @@ int llclose(int showStatistics) {
             }
         }
 
-        if (alarmCount >= MAX_RETRIES) {
+        if (alarmCount >= retransmissions) {
             numTimeouts++;
             return -1;
         }
@@ -458,7 +458,7 @@ int llclose(int showStatistics) {
         unsigned char byte;
         alarmCount = 0;
 
-        while (alarmCount < MAX_RETRIES) {
+        while (alarmCount < retransmissions) {
             if (!alarmEnabled) {
                 alarm(timeout); 
                 alarmEnabled = TRUE;
@@ -500,7 +500,7 @@ int llclose(int showStatistics) {
             }
         }
 
-        if (alarmCount >= MAX_RETRIES) {
+        if (alarmCount >= retransmissions) {
             numTimeouts++;
             return -1; 
         }
@@ -510,7 +510,7 @@ int llclose(int showStatistics) {
         state = START; 
         alarmCount = 0;
 
-        while (alarmCount < MAX_RETRIES) {
+        while (alarmCount < retransmissions) {
             if (!alarmEnabled) {
                 alarm(timeout); 
                 alarmEnabled = TRUE;
@@ -551,8 +551,8 @@ int llclose(int showStatistics) {
                 }
             }
         }
-        
-        if (alarmCount >= MAX_RETRIES) {
+
+        if (alarmCount >= retransmissions) {
             numTimeouts++;
             return -1; 
         }
