@@ -22,7 +22,6 @@ typedef enum {
     C_RCV, 
     BCC_OK, 
     STOP_STATE,
-    STOP_READ,
 }LinkLayerState;
 
 typedef struct

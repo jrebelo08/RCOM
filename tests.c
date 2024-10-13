@@ -34,10 +34,26 @@ int main(int argc, char *argv[]) {
         printf("Link layer connection established.\n");
     }
 
+    
+
     if (connectionParameters.role == LlTx) {
-        printf("Transmitting data...\n");
+        char data[] = "Hello, this is a test message.";
+        int bytesWritten = llwrite(data, sizeof(data));
+        if (bytesWritten == -1) {
+            printf("Failed to write data.\n");
+            return 1;
+        } else {
+            printf("Data written successfully.\n");
+        }
     } else if (connectionParameters.role == LlRx) {
-        printf("Receiving data...\n");
+        char buffer[256];
+        int bytesRead = llread(buffer);
+        if (bytesRead == -1) {
+            printf("Failed to read data.\n");
+            return 1;
+        } else {
+            printf("Data read successfully: %s\n", buffer);
+        }
     }
 
     if (llclose(1) == -1) {

@@ -82,6 +82,30 @@ void sendDISCFrame() {
     sendFrame(CTRL_DISC, "DISC");
 }
 
+void sendRRFrame(int seq) {
+    if (seq == 0) {
+        sendFrame(CTRL_RR0, "RR0");
+    } else if (seq == 1) {
+        sendFrame(CTRL_RR1, "RR1");
+    } 
+}
+
+void sendREJFrame(int seq) {
+    if (seq == 0) {
+        sendFrame(CTRL_REJ0, "REJ0");
+    } else if (seq == 1) {
+        sendFrame(CTRL_REJ1, "REJ1");
+    } 
+}
+
+void sendIFrame(int seq) {
+    if (seq == 0) {
+        sendFrame(CTRL_I_0, "I0");
+    } else if (seq == 1) {
+        sendFrame(CTRL_I_1, "I1");
+    }
+}
+
 int llOpenRxStateMachine() {
     LinkLayerState state = START;
     char buf[BUF_SIZE + 1] = {0}; 
@@ -379,19 +403,109 @@ int llwrite(const unsigned char *buf, int bufSize) {
     return -1; 
 }
 
+static int checkBCC2(const unsigned char *data, int length, unsigned char bcc2) {
+    unsigned char calculatedBCC2 = data[0];
+    for (int j = 1; j < length; j++) {
+        calculatedBCC2 ^= data[j];
+    }
+    return calculatedBCC2 == bcc2;
+}
 ////////////////////////////////////////////////
 // LLREAD
 ////////////////////////////////////////////////
-int llread(unsigned char *packet)
-{
-    LinkLayerState state = START;
+int llread(unsigned char *packet) {
+    enum ReadFrame {
+        START,          
+        FLAG_RCV,       
+        A_RCV,          
+        C_RCV,          
+        READING_DATA,   
+        DATA_ESCAPED,   
+        STOP_STATE          
+    } state = START;
+    
     unsigned char byte;
+    unsigned char controlField;
+    int dataIdx = 0;
 
-    while(state != STOP_READ){
-        if (readByte((char *) &byte) > 0) {
+    while (state != STOP_STATE) {
+        if(readByte((char *)&byte)){
+
+            switch (state) {
+                case START:
+                    if (byte == FLAG) state = FLAG_RCV; 
+                    break;
+
+                case FLAG_RCV:
+                    if (byte == ADDR_RX) {
+                        state = A_RCV;  
+                    } else if (byte != FLAG) {
+                        state = START;  
+                    }
+                    break;
+
+                case A_RCV:
+                    if (byte == CTRL_I_0 || byte == CTRL_I_1) {
+                        controlField = byte; 
+                        state = C_RCV;
+                    } else if (byte == FLAG) {
+                        state = FLAG_RCV; 
+                    } else if (byte == CTRL_DISC) {
+                        sendDISCFrame();
+                        return 0;  
+                    } else {
+                        state = START;  
+                    }
+                    break;
+
+                case C_RCV:
+                    if (byte == (ADDR_RX ^ controlField)) {
+                        state = READING_DATA; 
+                    } else if (byte == FLAG) {
+                        state = FLAG_RCV; 
+                    } else {
+                        state = START;  
+                    }
+                    break;
+
+                case READING_DATA:
+                    if (byte == ESC) {
+                        state = DATA_ESCAPED;  
+                    } else if (byte == FLAG) {
+                    
+                        unsigned char bcc2 = packet[dataIdx - 1];
+                        dataIdx--;  
+
+                        if (checkBCC2(packet, dataIdx, bcc2)) {
+                            sendRRFrame((controlField == CTRL_I_0) ? 0 : 1);
+                            frame_number = 1 - frame_number; 
+                            return dataIdx; 
+                        } else {
+                            sendREJFrame((controlField == CTRL_I_0) ? 0 : 1);
+                            return -1;  
+                        }
+                    } else {
+                        packet[dataIdx++] = byte;
+                    }
+                    break;
+
+                case DATA_ESCAPED:
+                    state = READING_DATA;  
+                    if (byte == ESC || byte == FLAG) {
+                        packet[dataIdx++] = byte;  
+                    } else {
+                        packet[dataIdx++] = ESC;
+                        packet[dataIdx++] = byte;  
+                    }
+                    break;
+
+                default:
+                    state = START;  
+                    break;
+            }
         }
-    }   
-    return 0;
+    }
+    return -1;  
 }
 
 ////////////////////////////////////////////////
