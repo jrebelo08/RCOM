@@ -145,17 +145,15 @@ int llOpenTxStateMachine() {
 
     STOP = FALSE;
 
-    sendSETFrame(); // Initially send the SET frame
-    alarm(3);       // Set alarm for 3 seconds
+    sendSETFrame(); 
+
+    initializeAlarm();
+    alarm(timeout);       
     alarmEnabled = TRUE;
 
     while (STOP == FALSE && alarmCount < retransmissions) {
         int bytes = readByte(buf);
         if (bytes > 0) {
-            alarm(0);
-            alarmEnabled = FALSE; 
-            alarmCount = 0; 
-
             switch (state) {
             case START:
                 if (buf[0] == FLAG) 
@@ -191,20 +189,27 @@ int llOpenTxStateMachine() {
                 break;
             case STOP_STATE:
                 STOP = TRUE;
+                alarm(0);
+                alarmEnabled = FALSE;
+                alarmCount = 0;
                 break;
             }
-        } else if (alarmEnabled == FALSE) {
+        } else if (!alarmEnabled) {
+            alarmCount++;
             if (alarmCount >= retransmissions) {
-                printf("Max alarms reached. Aborting.\n");
+                numTimeouts++;
                 return -1; 
             }
-
             sendSETFrame();
-            alarm(3); 
-            alarmEnabled = TRUE;
+            initializeAlarm();
+            alarm(timeout);
+            alarmEnabled = TRUE; 
+            if(alarmCount > 0){
+                numRetransmissions++;
+            }
         }
     }
-    return 1; // Success
+    return 1;
 }
 
 ////////////////////////////////////////////////
@@ -221,8 +226,6 @@ int llopen(LinkLayer connectionParameters)
     {
         return -1;
     }
-
-    initializeAlarm();
 
     if (connectionParameters.role == LlRx) {
         return llOpenRxStateMachine(); 
@@ -283,15 +286,13 @@ int llwrite(const unsigned char *buf, int bufSize) {
     unsigned char *stuffedFrame = byteStuffing(frame, frameSize, &stuffedSize);
     free(frame); // Free original frame memory
 
-    initializeAlarm(); 
-    alarmCount = 0;
-
     STOP = FALSE;
 
     while (STOP == FALSE && alarmCount < retransmissions) {
         // Transmit the frame to rx
         writeBytes((const char *)stuffedFrame, stuffedSize); // Send the stuffed frame
         numFramesSent++;
+        initializeAlarm();
         alarm(timeout); 
         alarmEnabled = TRUE;
 
@@ -316,7 +317,9 @@ int llwrite(const unsigned char *buf, int bufSize) {
                     else if (frame_number == 0 && byte == CTRL_REJ0) {
                         state = C_RCV;
                         reject = 1; 
-                        numRetransmissions++;
+                        if(alarmCount > 0){
+                            numRetransmissions++;
+                        }
                     }
                     else if (frame_number == 1 && byte == CTRL_RR1) {
                         state = C_RCV;
@@ -325,7 +328,9 @@ int llwrite(const unsigned char *buf, int bufSize) {
                     else if (frame_number == 1 && byte == CTRL_REJ1) {
                         state = C_RCV;
                         reject = 1;
-                        numRetransmissions++;
+                        if(alarmCount > 0){
+                            numRetransmissions++;
+                        }
                     }
                     else if (byte == FLAG) {
                         state = FLAG_RCV;
@@ -395,37 +400,36 @@ int llread(unsigned char *packet)
 
 int llclose(int showStatistics) {
 
-    initializeAlarm();
-
     if (role == LlTx) {
         sendDISCFrame(); 
-        numFramesSent++;
 
         LinkLayerState state = START;
         unsigned char byte;
         alarmCount = 0;
 
+        initializeAlarm();
         alarm(timeout); 
         alarmEnabled = TRUE;
 
         while (STOP == FALSE) {
             if (!alarmEnabled) {  
+                alarmCount++;
                 if (alarmCount >= retransmissions) {
                     numTimeouts++;
                     return -1;
                 }
                 
                 sendDISCFrame();
-                numFramesSent++;
-                alarmCount++;  
+                if(alarmCount > 0){
+                    numRetransmissions++;
+                }
 
+                initializeAlarm();
                 alarm(timeout);
                 alarmEnabled = TRUE;
             }
 
             if (readByte((char*)&byte) > 0) {
-                alarm(0);  
-                alarmEnabled = FALSE;
 
                 switch (state) {
                     case START:
@@ -453,6 +457,9 @@ int llclose(int showStatistics) {
                         }
                         break;
                     case STOP_STATE:
+                        alarm(0);
+                        alarmEnabled = FALSE;
+                        alarmCount = 0;
                         STOP = TRUE;
                         break;
                 }
@@ -460,35 +467,14 @@ int llclose(int showStatistics) {
         }
 
         sendUAFrame();
-        numFramesSent++;
 
     } else if (role == LlRx) {
         LinkLayerState state = START;
         unsigned char byte;
         alarmCount = 0;
 
-        alarm(timeout); 
-        alarmEnabled = TRUE;
-
         while (STOP == FALSE) {
-            if (!alarmEnabled) {  
-                if (alarmCount >= retransmissions) {
-                    numTimeouts++;
-                    return -1;
-                }
-                
-                sendDISCFrame();
-                numFramesSent++;
-                alarmCount++;  
-
-                alarm(timeout);
-                alarmEnabled = TRUE;
-            }
-
             if (readByte((char*)&byte) > 0) {
-                alarm(0);  
-                alarmEnabled = FALSE;
-
                 switch (state) {
                     case START:
                         if (byte == FLAG) state = FLAG_RCV;
@@ -525,13 +511,13 @@ int llclose(int showStatistics) {
         numFramesSent++;
 
         state = START;
-        alarmCount = 0;
-
-        alarm(timeout);
+        initializeAlarm();
+        alarm(timeout); 
         alarmEnabled = TRUE;
 
         while (STOP == FALSE) {
             if (!alarmEnabled) {  
+                alarmCount++;
                 if (alarmCount >= retransmissions) {
                     numTimeouts++;
                     return -1;
@@ -539,22 +525,22 @@ int llclose(int showStatistics) {
                 
                 sendDISCFrame();
                 numFramesSent++;
-                alarmCount++;  
-
-                alarm(timeout);
+                if(alarmCount > 0){
+                    numRetransmissions++;
+                }
+                initializeAlarm();
+                alarm(timeout); 
                 alarmEnabled = TRUE;
             }
 
             if (readByte((char*)&byte) > 0) {
-                alarm(0);  
-                alarmEnabled = FALSE;
 
                 switch (state) {
                     case START:
                         if (byte == FLAG) state = FLAG_RCV;
                         break;
                     case FLAG_RCV:
-                        if (byte == ADDR_TX) state = A_RCV;
+                        if (byte == ADDR_RX) state = A_RCV;
                         else if (byte != FLAG) state = START;
                         break;
                     case A_RCV:
@@ -563,7 +549,7 @@ int llclose(int showStatistics) {
                         else state = START;
                         break;
                     case C_RCV:
-                        if (byte == (ADDR_TX ^ CTRL_UA)) state = BCC_OK;
+                        if (byte == (ADDR_RX ^ CTRL_UA)) state = BCC_OK;
                         else if (byte == FLAG) state = FLAG_RCV;
                         else state = START;
                         break;
@@ -575,6 +561,9 @@ int llclose(int showStatistics) {
                         }
                         break;
                     case STOP_STATE:
+                        alarm(0); 
+                        alarmEnabled = FALSE;
+                        alarmCount = 0;
                         STOP = TRUE;
                         break;
                 }
@@ -582,10 +571,7 @@ int llclose(int showStatistics) {
         }
     }
 
-    int closeStat = closeSerialPort(); 
-    if (closeStat < 0) {
-        return -1; 
-    }
+    closeSerialPort();
 
     if (showStatistics) {
         printf("Statistics:\n");
