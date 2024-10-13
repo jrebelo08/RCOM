@@ -392,24 +392,39 @@ int llread(unsigned char *packet)
 ////////////////////////////////////////////////
 // LLCLOSE
 ////////////////////////////////////////////////
+
 int llclose(int showStatistics) {
-    STOP = TRUE; // Stop processing frames
+
+    initializeAlarm();
 
     if (role == LlTx) {
         sendDISCFrame(); 
+        numFramesSent++;
 
         LinkLayerState state = START;
         unsigned char byte;
         alarmCount = 0;
 
-        while (alarmCount < retransmissions) {
-            if (!alarmEnabled) {
-                alarm(timeout); 
+        alarm(timeout); 
+        alarmEnabled = TRUE;
+
+        while (STOP == FALSE) {
+            if (!alarmEnabled) {  
+                if (alarmCount >= retransmissions) {
+                    numTimeouts++;
+                    return -1;
+                }
+                
+                sendDISCFrame();
+                numFramesSent++;
+                alarmCount++;  
+
+                alarm(timeout);
                 alarmEnabled = TRUE;
             }
 
             if (readByte((char*)&byte) > 0) {
-                alarm(0); 
+                alarm(0);  
                 alarmEnabled = FALSE;
 
                 switch (state) {
@@ -444,26 +459,34 @@ int llclose(int showStatistics) {
             }
         }
 
-        if (alarmCount >= retransmissions) {
-            numTimeouts++;
-            return -1;
-        }
-
         sendUAFrame();
+        numFramesSent++;
 
     } else if (role == LlRx) {
         LinkLayerState state = START;
         unsigned char byte;
         alarmCount = 0;
 
-        while (alarmCount < retransmissions) {
-            if (!alarmEnabled) {
-                alarm(timeout); 
+        alarm(timeout); 
+        alarmEnabled = TRUE;
+
+        while (STOP == FALSE) {
+            if (!alarmEnabled) {  
+                if (alarmCount >= retransmissions) {
+                    numTimeouts++;
+                    return -1;
+                }
+                
+                sendDISCFrame();
+                numFramesSent++;
+                alarmCount++;  
+
+                alarm(timeout);
                 alarmEnabled = TRUE;
             }
 
             if (readByte((char*)&byte) > 0) {
-                alarm(0); 
+                alarm(0);  
                 alarmEnabled = FALSE;
 
                 switch (state) {
@@ -498,24 +521,32 @@ int llclose(int showStatistics) {
             }
         }
 
-        if (alarmCount >= retransmissions) {
-            numTimeouts++;
-            return -1; 
-        }
-
         sendDISCFrame();
+        numFramesSent++;
 
-        state = START; 
+        state = START;
         alarmCount = 0;
 
-        while (alarmCount < retransmissions) {
-            if (!alarmEnabled) {
-                alarm(timeout); 
+        alarm(timeout);
+        alarmEnabled = TRUE;
+
+        while (STOP == FALSE) {
+            if (!alarmEnabled) {  
+                if (alarmCount >= retransmissions) {
+                    numTimeouts++;
+                    return -1;
+                }
+                
+                sendDISCFrame();
+                numFramesSent++;
+                alarmCount++;  
+
+                alarm(timeout);
                 alarmEnabled = TRUE;
             }
 
             if (readByte((char*)&byte) > 0) {
-                alarm(0); 
+                alarm(0);  
                 alarmEnabled = FALSE;
 
                 switch (state) {
@@ -549,16 +580,10 @@ int llclose(int showStatistics) {
                 }
             }
         }
-
-        if (alarmCount >= retransmissions) {
-            numTimeouts++;
-            return -1; 
-        }
     }
 
     int closeStat = closeSerialPort(); 
     if (closeStat < 0) {
-        printf("Failed to close the serial port.\n");
         return -1; 
     }
 
