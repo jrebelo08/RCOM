@@ -55,6 +55,19 @@ void initializeAlarm() {
     }
 }
 
+void handleAlarm() {
+    alarmCount++;
+    if (alarmCount >= retransmissions) {
+        numTimeouts++;
+    }
+    initializeAlarm();
+    alarm(timeout);
+    alarmEnabled = TRUE;
+    if (alarmCount > 0) {
+        numRetransmissions++;
+    }
+}
+
 void sendFrame(unsigned char controlByte, const char *frameType) {
     char buf_s[BUF_SIZE] = {0};
 
@@ -106,158 +119,141 @@ void sendIFrame(int seq) {
     }
 }
 
-int llOpenRxStateMachine() {
-    LinkLayerState state = START;
-    char buf[BUF_SIZE + 1] = {0}; 
+int handleStateMachine(LinkLayerState *state, unsigned char byte, unsigned char expectedAddr, unsigned char expectedCtrl, unsigned char expectedBCC) {
+    switch (*state) {
+        case START:
+            if (byte == FLAG) *state = FLAG_RCV;
+            break;
+        case FLAG_RCV:
+            if (byte == expectedAddr) *state = A_RCV;
+            else if (byte != FLAG) *state = START;
+            break;
+        case A_RCV:
+            if (byte == expectedCtrl) *state = C_RCV;
+            else if (byte == FLAG) *state = FLAG_RCV;
+            else *state = START;
+            break;
+        case C_RCV:
+            if (byte == expectedBCC) *state = BCC_OK;
+            else if (byte == FLAG) *state = FLAG_RCV;
+            else *state = START;
+            break;
+        case BCC_OK:
+            if (byte == FLAG) {
+                *state = STOP_STATE;
+                STOP = TRUE;
+            } else {
+                *state = START;
+            }
+            break;
+    }
+    return (*state == STOP_STATE) ? 1 : -1;
+}
 
+int llOpenRx() {
+    LinkLayerState state = START;
+    unsigned char byte;
     STOP = FALSE;
 
     while (STOP == FALSE) {
-        int bytes = readByte(buf); 
-        if (bytes > 0) {
-            switch (state) {
-            case START:
-                if (buf[0] == FLAG) 
-                    state = FLAG_RCV;
-                break;
-            case FLAG_RCV:
-                if (buf[0] == ADDR_TX) 
-                    state = A_RCV;
-                else if (buf[0] != FLAG)
-                    state = START;
-                break;
-            case A_RCV:
-                if (buf[0] == CTRL_SET) 
-                    state = C_RCV;
-                else if (buf[0] == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-            case C_RCV:
-                if (buf[0] == (ADDR_TX ^ CTRL_SET)) 
-                    state = BCC_OK;
-                else if (buf[0] == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-            case BCC_OK:
-                if (buf[0] == FLAG){
-                    state = STOP_STATE;
-                    STOP = TRUE;
-                }else{
-                    state = START;
-                }
-                break;
+        if (readByte((char *)&byte) > 0) {
+            if (handleStateMachine(&state, byte, ADDR_TX, CTRL_SET, ADDR_TX ^ CTRL_SET) == 1) {
+                sendUAFrame();
+                return 1;
             }
         }
     }
-
-    if (state == STOP_STATE) {
-        sendUAFrame();
-        return 1; 
-    }
-    return -1; 
+    return -1;
 }
 
-int llOpenTxStateMachine() {
+int llOpenTx() {
     LinkLayerState state = START;
-    char buf[BUF_SIZE + 1] = {0}; // +1 for the final '\0' char
-    int alarmCount = 0;
-
+    unsigned char byte;
     STOP = FALSE;
 
-    sendSETFrame(); 
-
+    sendSETFrame();
     initializeAlarm();
-    alarm(timeout);       
+    alarm(timeout);
     alarmEnabled = TRUE;
 
     while (STOP == FALSE && alarmCount < retransmissions) {
-            if (!alarmEnabled) {
-                alarmCount++;
-                if (alarmCount >= retransmissions) {
-                    numTimeouts++;
-                    return -1; 
-                }
-                sendSETFrame();
-                initializeAlarm();
-                alarm(timeout);
-                alarmEnabled = TRUE; 
-                if(alarmCount > 0){
-                    numRetransmissions++;
-                }
+        if (!alarmEnabled) {
+            handleAlarm();
+            if (alarmCount >= retransmissions) return -1;
+            sendSETFrame();
+        }
+
+        if (readByte((char *)&byte) > 0) {
+            if (handleStateMachine(&state, byte, ADDR_TX, CTRL_UA, ADDR_TX ^ CTRL_UA) == 1) {
+                alarm(0);
+                alarmEnabled = FALSE;
+                alarmCount = 0;
+                return 1;
             }
-                int bytes = readByte(buf);
-                if (bytes > 0) {
-                    switch (state) {
-                    case START:
-                        if (buf[0] == FLAG) 
-                            state = FLAG_RCV;
-                        break;
-                    case FLAG_RCV:
-                        if (buf[0] == ADDR_TX) 
-                            state = A_RCV;
-                        else if (buf[0] != FLAG)
-                            state = START;
-                        break;
-                    case A_RCV:
-                        if (buf[0] == CTRL_UA) 
-                            state = C_RCV;
-                        else if (buf[0] == FLAG)
-                            state = FLAG_RCV;
-                        else
-                            state = START;
-                        break;
-                    case C_RCV:
-                        if (buf[0] == (ADDR_TX ^ CTRL_UA)) 
-                            state = BCC_OK;
-                        else if (buf[0] == FLAG)
-                            state = FLAG_RCV;
-                        else
-                            state = START;
-                        break;
-                    case BCC_OK:
-                        if (buf[0] == FLAG){
-                            state = STOP_STATE;
-                            alarm(0);
-                            alarmEnabled = FALSE;
-                            alarmCount = 0;
-                            STOP = TRUE;
-                        }else{
-                            state = START;
-                        }
-                        break;
-                    }
-                }
+        }
     }
-    return 1;
+    return -1;
 }
 
 ////////////////////////////////////////////////
 // LLOPEN
 ////////////////////////////////////////////////
-int llopen(LinkLayer connectionParameters)
-{
+int llopen(LinkLayer connectionParameters) {
     role = connectionParameters.role;
     retransmissions = connectionParameters.nRetransmissions;
     timeout = connectionParameters.timeout;
-    
-    if (openSerialPort(connectionParameters.serialPort,
-                       connectionParameters.baudRate) < 0)
-    {
+
+    if (openSerialPort(connectionParameters.serialPort, connectionParameters.baudRate) < 0) {
         return -1;
     }
 
     if (connectionParameters.role == LlRx) {
-        return llOpenRxStateMachine(); 
+        return llOpenRx();
     } else if (connectionParameters.role == LlTx) {
-        return llOpenTxStateMachine(); 
+        return llOpenTx();
     }
 
     return -1;
 }
+
+
+int handleLlwriteStateTransition(LinkLayerState *state, unsigned char byte, unsigned char *cField, int *reject) {
+    switch (*state) {
+        case START:
+            if (byte == FLAG) *state = FLAG_RCV;
+            break;
+        case FLAG_RCV:
+            if (byte == ADDR_TX) *state = A_RCV;
+            else if (byte != FLAG) *state = START;
+            break;
+        case A_RCV:
+            if (byte == CTRL_RR0 || byte == CTRL_RR1 || byte == CTRL_REJ0 || byte == CTRL_REJ1 || byte == CTRL_DISC) {
+                *state = C_RCV;
+                *cField = byte;
+            } else if (byte == FLAG) {
+                *state = FLAG_RCV;
+            } else {
+                *state = START;
+            }
+            break;
+        case C_RCV:
+            if (byte == (ADDR_TX ^ *cField)) {
+                *state = BCC_OK;
+                *reject = (byte == CTRL_REJ0 || byte == CTRL_REJ1) ? 1 : 0;
+            } else if (byte == FLAG) {
+                *state = FLAG_RCV;
+            } else {
+                *state = START;
+            }
+            break;
+        case BCC_OK:
+            return 1; 
+        default:
+            break;
+    }
+    return 0; 
+}
+
 
 unsigned char* buildFrame(const unsigned char *buf, int bufSize, int *frameSize) {
     int oldFrameSize = bufSize + 6;
@@ -282,7 +278,7 @@ unsigned char* buildFrame(const unsigned char *buf, int bufSize, int *frameSize)
 }
 
 unsigned char* byteStuffing(const unsigned char *oldFrame, int oldFrameSize, int *newFrameSize) {
-    unsigned char *newFrame = (unsigned char*) malloc(oldFrameSize * 2);  
+    unsigned char *newFrame = (unsigned char*) malloc(oldFrameSize * 2);
 
     int newSize = 0;
     for (int j = 0; j < 4; j++) {
@@ -319,120 +315,69 @@ int llwrite(const unsigned char *buf, int bufSize) {
     unsigned char cField;
 
     int oldFrameSize;
-    unsigned char *oldFrame = buildFrame(buf, bufSize, &oldFrameSize); 
+    unsigned char *oldFrame = buildFrame(buf, bufSize, &oldFrameSize);
 
     int newFrameSize;
-    unsigned char *newFrame = byteStuffing(oldFrame, oldFrameSize, &newFrameSize);  
+    unsigned char *newFrame = byteStuffing(oldFrame, oldFrameSize, &newFrameSize);
 
-    free(oldFrame);  
+    free(oldFrame);
     STOP = FALSE;
 
     initializeAlarm();
     alarm(timeout);
     alarmEnabled = TRUE;
-    writeBytes((const char *)newFrame, newFrameSize);  
+
+    writeBytes((const char *)newFrame, newFrameSize);
     numFramesSent++;
 
     printf("llwrite: Frame sent, size = %d, frame_number = %d\n", newFrameSize, frame_number);
 
     while (STOP == FALSE && alarmCount < retransmissions) {
-
         if (!alarmEnabled) {
-            alarmCount++;
-            printf("llwrite: Timeout occurred, retransmitting (attempt %d/%d)\n", alarmCount, retransmissions);
+            handleAlarm();
             if (alarmCount >= retransmissions) {
-                numTimeouts++;
                 free(newFrame);
-                return -1; 
+                return -1;
             }
-                
-            writeBytes((const char *)newFrame, newFrameSize);  
+            writeBytes((const char *)newFrame, newFrameSize);
             numFramesSent++;
             printf("llwrite: Retransmitted frame, size = %d\n", newFrameSize);
-                
-            initializeAlarm();
-            alarm(timeout);
-            alarmEnabled = TRUE; 
-                
-            if (alarmCount > 0) {
-                numRetransmissions++;
-            }
         }
 
-        if (readByte((char *) &byte) > 0) {
+        if (readByte((char *)&byte) > 0) {
             printf("llwrite: Byte received = 0x%02X, current state = %d\n", byte, state);
-            switch (state) {
-                case START:
-                    if (byte == FLAG) state = FLAG_RCV;
-                    break;
-                case FLAG_RCV:
-                    if (byte == ADDR_TX) state = A_RCV;
-                    else if (byte != FLAG) state = START;
-                    break;
-                case A_RCV:
-                    if (byte == CTRL_RR0 || byte == CTRL_RR1 || byte == CTRL_REJ0 || byte == CTRL_REJ1 || byte == CTRL_DISC) {
-                        state = C_RCV;
-                        cField = byte;   
-                    }
-                    else if (byte == FLAG) {
-                        state = FLAG_RCV;
-                    }
-                    else {
-                        state = START;
-                    }
-                    break;
-                case C_RCV:
-                    if (byte == (ADDR_TX ^ cField)) {
-                        state = BCC_OK;
-                        reject = (cField == CTRL_REJ0 || cField == CTRL_REJ1) ? 1 : 0;
-                        if (reject) {
-                            printf("llwrite: Frame rejected, will retransmit.\n");
-                        }
-                    }
-                    else if (byte == FLAG) {
-                        state = FLAG_RCV;
-                    }
-                    else {
-                        state = START;
-                    }
-                    break;
-                case BCC_OK:
-                        alarm(0);
-                        alarmEnabled = FALSE;
-                        free(newFrame);
-                        frame_number = 1 - frame_number;
-                        state = STOP_STATE;
-                        STOP = TRUE;
-                        printf("llwrite: Frame acknowledged, transmission successful.\n");
-                        return bufSize; 
-                    break;
-                case STOP_STATE:
-                    break;
+            if (handleLlwriteStateTransition(&state, byte, &cField, &reject)) {
+                alarm(0);
+                alarmEnabled = FALSE;
+                free(newFrame);
+                frame_number = 1 - frame_number;
+                STOP = TRUE;
+                printf("llwrite: Frame acknowledged, transmission successful.\n");
+                return bufSize;
             }
         }
 
         if (alarmCount >= retransmissions) {
-            numTimeouts++;
             STOP = TRUE;
             printf("llwrite: Maximum retransmissions reached, transmission failed.\n");
             break;
         }
     }
 
-        if (reject){
-            initializeAlarm();
-            alarmEnabled = TRUE;
-            alarm(timeout);
-
-            writeBytes((const char *)newFrame, newFrameSize);  
-            numFramesSent++;
-            printf("llwrite: Resending on Start frame, size = %d\n", newFrameSize);
-        }
+    if (reject) {
+        handleAlarm();
+        writeBytes((const char *)newFrame, newFrameSize);
+        numFramesSent++;
+        printf("llwrite: Resending on Start frame, size = %d\n", newFrameSize);
+    }
 
     free(newFrame);
     return -1;
 }
 
+////////////////////////////////////////////////
+// LLREAD
+////////////////////////////////////////////////
 ////////////////////////////////////////////////
 // LLREAD
 ////////////////////////////////////////////////
@@ -563,55 +508,18 @@ int llclose(int showStatistics) {
 
         while (STOP == FALSE) {
             if (!alarmEnabled) {  
-                alarmCount++;
+                handleAlarm();
                 if (alarmCount >= retransmissions) {
-                    numTimeouts++;
                     return -1;
                 }
-                
                 sendDISCFrame();
-                if(alarmCount > 0){
-                    numRetransmissions++;
-                }
-
-                initializeAlarm();
-                alarm(timeout);
-                alarmEnabled = TRUE;
             }
 
             if (readByte((char*)&byte) > 0) {
-
-                switch (state) {
-                    case START:
-                        if (byte == FLAG) state = FLAG_RCV;
-                        break;
-                    case FLAG_RCV:
-                        if (byte == ADDR_RX) state = A_RCV;
-                        else if (byte != FLAG) state = START;
-                        break;
-                    case A_RCV:
-                        if (byte == CTRL_DISC) state = C_RCV;
-                        else if (byte == FLAG) state = FLAG_RCV;
-                        else state = START;
-                        break;
-                    case C_RCV:
-                        if (byte == (ADDR_RX ^ CTRL_DISC)) state = BCC_OK;
-                        else if (byte == FLAG) state = FLAG_RCV;
-                        else state = START;
-                        break;
-                    case BCC_OK:
-                        if (byte == FLAG) {
-                            state = STOP_STATE;
-                        } else {
-                            state = START;
-                        }
-                        break;
-                    case STOP_STATE:
-                        alarm(0);
-                        alarmEnabled = FALSE;
-                        alarmCount = 0;
-                        STOP = TRUE;
-                        break;
+                if (handleStateMachine(&state, byte, ADDR_RX, CTRL_DISC, ADDR_RX ^ CTRL_DISC) == 1) {
+                    alarm(0);
+                    alarmEnabled = FALSE;
+                    STOP = TRUE;
                 }
             }
         }
@@ -621,101 +529,35 @@ int llclose(int showStatistics) {
     } else if (role == LlRx) {
         LinkLayerState state = START;
         unsigned char byte;
-        alarmCount = 0;
+        STOP = FALSE;
 
         while (STOP == FALSE) {
             if (readByte((char*)&byte) > 0) {
-                switch (state) {
-                    case START:
-                        if (byte == FLAG) state = FLAG_RCV;
-                        break;
-                    case FLAG_RCV:
-                        if (byte == ADDR_TX) state = A_RCV;
-                        else if (byte != FLAG) state = START;
-                        break;
-                    case A_RCV:
-                        if (byte == CTRL_DISC) state = C_RCV;
-                        else if (byte == FLAG) state = FLAG_RCV;
-                        else state = START;
-                        break;
-                    case C_RCV:
-                        if (byte == (ADDR_TX ^ CTRL_DISC)) state = BCC_OK;
-                        else if (byte == FLAG) state = FLAG_RCV;
-                        else state = START;
-                        break;
-                    case BCC_OK:
-                        if (byte == FLAG) {
-                            state = STOP_STATE;
-                        } else {
-                            state = START;
-                        }
-                        break;
-                    case STOP_STATE:
-                        STOP = TRUE;
-                        break;
+                if (handleStateMachine(&state, byte, ADDR_TX, CTRL_DISC, ADDR_TX ^ CTRL_DISC) == 1) {
+                    STOP = TRUE;
                 }
             }
         }
 
         sendDISCFrame();
-        numFramesSent++;
 
         state = START;
-        initializeAlarm();
-        alarm(timeout); 
-        alarmEnabled = TRUE;
+        handleAlarm();
 
         while (STOP == FALSE) {
             if (!alarmEnabled) {  
-                alarmCount++;
+                handleAlarm();
                 if (alarmCount >= retransmissions) {
-                    numTimeouts++;
                     return -1;
                 }
-                
                 sendDISCFrame();
-                numFramesSent++;
-                if(alarmCount > 0){
-                    numRetransmissions++;
-                }
-                initializeAlarm();
-                alarm(timeout); 
-                alarmEnabled = TRUE;
             }
 
             if (readByte((char*)&byte) > 0) {
-
-                switch (state) {
-                    case START:
-                        if (byte == FLAG) state = FLAG_RCV;
-                        break;
-                    case FLAG_RCV:
-                        if (byte == ADDR_RX) state = A_RCV;
-                        else if (byte != FLAG) state = START;
-                        break;
-                    case A_RCV:
-                        if (byte == CTRL_UA) state = C_RCV;
-                        else if (byte == FLAG) state = FLAG_RCV;
-                        else state = START;
-                        break;
-                    case C_RCV:
-                        if (byte == (ADDR_RX ^ CTRL_UA)) state = BCC_OK;
-                        else if (byte == FLAG) state = FLAG_RCV;
-                        else state = START;
-                        break;
-                    case BCC_OK:
-                        if (byte == FLAG) {
-                            state = STOP_STATE;
-                        } else {
-                            state = START;
-                        }
-                        break;
-                    case STOP_STATE:
-                        alarm(0); 
-                        alarmEnabled = FALSE;
-                        alarmCount = 0;
-                        STOP = TRUE;
-                        break;
+                if (handleStateMachine(&state, byte, ADDR_RX, CTRL_UA, ADDR_RX ^ CTRL_UA) == 1) {
+                    alarm(0); 
+                    alarmEnabled = FALSE;
+                    STOP = TRUE;
                 }
             }
         }
