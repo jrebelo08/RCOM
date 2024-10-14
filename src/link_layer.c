@@ -17,10 +17,10 @@
 // Control Field Constants
 #define CTRL_SET 0x03      // Control field for SET frame
 #define CTRL_UA 0x07       // Control field for UA frame
-#define CTRL_RR0 0X05      // Control fiel for RR0 frame 0
-#define CTRL_RR1 0x85       // Control field for RR1 frame 1 
-#define CTRL_REJ0 0x01      // Control field for REJ0 frame 0 
-#define CTRL_REJ1 0x81      // Control field for REJ1 frame 1 
+#define CTRL_RR0 0XAA      // Control fiel for RR0 frame 0
+#define CTRL_RR1 0xAB       // Control field for RR1 frame 1 
+#define CTRL_REJ0 0x54      // Control field for REJ0 frame 0 
+#define CTRL_REJ1 0x55      // Control field for REJ1 frame 1 
 #define CTRL_DISC 0x0B     // Control field for DISC (Disconnect)
 #define CTRL_I_0 0x00      // Control field for I-frame with sequence number 0
 #define CTRL_I_1 0x40      // Control field for I-frame with sequence number 1
@@ -219,7 +219,6 @@ int llOpenTxStateMachine() {
                             state = START;
                         break;
                     case BCC_OK:
-                        printf("%X", buf[0]);
                         if (buf[0] == FLAG){
                             state = STOP_STATE;
                             alarm(0);
@@ -260,70 +259,108 @@ int llopen(LinkLayer connectionParameters)
     return -1;
 }
 
-unsigned char* buildFrame(const unsigned char *buf, int bufSize) {
-    int frameSize = bufSize + 6;
-    unsigned char *frame = (unsigned char *)malloc(frameSize);
+unsigned char* buildFrame(const unsigned char *buf, int bufSize, int *frameSize) {
+    int oldFrameSize = bufSize + 6;
+    unsigned char *oldFrame = (unsigned char*) malloc(oldFrameSize);
 
-    frame[0] = FLAG; // Start flag
-    frame[1] = ADDR_TX; // Address field
-    frame[2] = (frame_number == 0) ? CTRL_I_0 : CTRL_I_1; // Control field
-    frame[3] = frame[1] ^ frame[2]; // BCC1
+    oldFrame[0] = FLAG;
+    oldFrame[1] = ADDR_TX;
+    oldFrame[2] = frame_number == 0 ? CTRL_I_0 : CTRL_I_1;
+    oldFrame[3] = ADDR_TX ^ (frame_number == 0 ? CTRL_I_0 : CTRL_I_1);
 
-    unsigned char bcc2 = 0;
+    unsigned char BCC2 = 0;
     for (int i = 0; i < bufSize; i++) {
-        frame[i + 4] = buf[i];
-        bcc2 ^= buf[i];
+        oldFrame[i + 4] = buf[i];
+        BCC2 ^= buf[i];
     }
-    frame[frameSize - 2] = bcc2;
-    frame[frameSize - 1] = FLAG;
 
-    return frame;
+    oldFrame[bufSize + 4] = BCC2;
+    oldFrame[bufSize + 5] = FLAG;
+
+    *frameSize = oldFrameSize;
+    return oldFrame;
 }
 
-unsigned char* byteStuffing(const unsigned char *frame, int frameSize) {
-    unsigned char *stuffedFrame = (unsigned char *)malloc(frameSize * 2); 
-    int stuffedSize = 0;
+unsigned char* byteStuffing(const unsigned char *oldFrame, int oldFrameSize, int *newFrameSize) {
+    unsigned char *newFrame = (unsigned char*) malloc(oldFrameSize * 2);  
 
-    for (int i = 0; i < frameSize; i++) {
-        if (frame[i] == FLAG) {
-            stuffedFrame[(stuffedSize)++] = ESC;
-            stuffedFrame[(stuffedSize)++] = 0x5e; // FLAG substitution
-        } else if (frame[i] == ESC) {
-            stuffedFrame[(stuffedSize)++] = ESC;
-            stuffedFrame[(stuffedSize)++] = 0x5d; // ESC substitution
+    int newSize = 0;
+    for (int j = 0; j < 4; j++) {
+        newFrame[newSize++] = oldFrame[j];
+    }
+
+    for (int j = 4; j < oldFrameSize - 1; j++) {
+        if (oldFrame[j] == FLAG) {
+            newFrame[newSize++] = ESC;
+            newFrame[newSize++] = 0x5e;
+        } else if (oldFrame[j] == ESC) {
+            newFrame[newSize++] = ESC;
+            newFrame[newSize++] = 0x5d;
         } else {
-            stuffedFrame[(stuffedSize)++] = frame[i];
+            newFrame[newSize++] = oldFrame[j];
         }
     }
-    return stuffedFrame;
+
+    newFrame[newSize++] = FLAG;
+
+    newFrame = realloc(newFrame, newSize);
+    *newFrameSize = newSize;
+
+    return newFrame;
 }
 
 ////////////////////////////////////////////////
 // LLWRITE
 ////////////////////////////////////////////////
 int llwrite(const unsigned char *buf, int bufSize) {
-    
-    unsigned char *frame = buildFrame(buf, bufSize);
+    LinkLayerState state = START;
+    int reject = 0;
+    unsigned char byte;
+    unsigned char cField;
 
-    unsigned char *stuffedFrame = byteStuffing(frame, bufSize + 6);
-    free(frame); // Free original frame memory
+    int oldFrameSize;
+    unsigned char *oldFrame = buildFrame(buf, bufSize, &oldFrameSize); 
 
+    int newFrameSize;
+    unsigned char *newFrame = byteStuffing(oldFrame, oldFrameSize, &newFrameSize);  
+
+    free(oldFrame);  
     STOP = FALSE;
 
-    while (STOP == FALSE && alarmCount < retransmissions) {
-        // Transmit the frame to rx
-        writeBytes((const char *)stuffedFrame, sizeof(stuffedFrame)); // Send the stuffed frame
-        numFramesSent++;
-        initializeAlarm();
-        alarm(timeout); 
-        alarmEnabled = TRUE;
+    initializeAlarm();
+    alarm(timeout);
+    alarmEnabled = TRUE;
+    writeBytes((const char *)newFrame, newFrameSize);  
+    numFramesSent++;
 
-        LinkLayerState state = START;
-        unsigned char byte;
-        int reject = 0;
+    printf("llwrite: Frame sent, size = %d, frame_number = %d\n", newFrameSize, frame_number);
+
+    while (STOP == FALSE && alarmCount < retransmissions) {
+
+        if (!alarmEnabled) {
+            alarmCount++;
+            printf("llwrite: Timeout occurred, retransmitting (attempt %d/%d)\n", alarmCount, retransmissions);
+            if (alarmCount >= retransmissions) {
+                numTimeouts++;
+                free(newFrame);
+                return -1; 
+            }
+                
+            writeBytes((const char *)newFrame, newFrameSize);  
+            numFramesSent++;
+            printf("llwrite: Retransmitted frame, size = %d\n", newFrameSize);
+                
+            initializeAlarm();
+            alarm(timeout);
+            alarmEnabled = TRUE; 
+                
+            if (alarmCount > 0) {
+                numRetransmissions++;
+            }
+        }
 
         if (readByte((char *) &byte) > 0) {
-            printf("%d", state);
+            printf("llwrite: Byte received = 0x%02X, current state = %d\n", byte, state);
             switch (state) {
                 case START:
                     if (byte == FLAG) state = FLAG_RCV;
@@ -333,82 +370,69 @@ int llwrite(const unsigned char *buf, int bufSize) {
                     else if (byte != FLAG) state = START;
                     break;
                 case A_RCV:
-                    if (frame_number == 0 && byte == CTRL_RR0) {
+                    if (byte == CTRL_RR0 || byte == CTRL_RR1 || byte == CTRL_REJ0 || byte == CTRL_REJ1 || byte == CTRL_DISC) {
                         state = C_RCV;
-                        reject = 0; 
-                    }
-                    else if (frame_number == 0 && byte == CTRL_REJ0) {
-                        state = C_RCV;
-                        reject = 1; 
-                        if(alarmCount > 0){
-                            numRetransmissions++;
-                        }
-                    }
-                    else if (frame_number == 1 && byte == CTRL_RR1) {
-                        state = C_RCV;
-                        reject = 0; 
-                    }
-                    else if (frame_number == 1 && byte == CTRL_REJ1) {
-                        state = C_RCV;
-                        reject = 1;
-                        if(alarmCount > 0){
-                            numRetransmissions++;
-                        }
+                        cField = byte;   
                     }
                     else if (byte == FLAG) {
                         state = FLAG_RCV;
-                    } else {
+                    }
+                    else {
                         state = START;
                     }
                     break;
                 case C_RCV:
-                    if (byte == (ADDR_TX ^ ((reject == 0) ? CTRL_RR1 : CTRL_REJ0))) {
+                    if (byte == (ADDR_TX ^ cField)) {
                         state = BCC_OK;
-                    } else if (byte == FLAG) {
+                        reject = (cField == CTRL_REJ0 || cField == CTRL_REJ1) ? 1 : 0;
+                        if (reject) {
+                            printf("llwrite: Frame rejected, will retransmit.\n");
+                        }
+                    }
+                    else if (byte == FLAG) {
                         state = FLAG_RCV;
-                    } else {
+                    }
+                    else {
                         state = START;
                     }
                     break;
                 case BCC_OK:
-                    if (byte == FLAG) {
-                        if (reject == 0) {
-                            alarm(0); 
-                            alarmEnabled = FALSE; 
-                            free(stuffedFrame); 
-                            frame_number = 1 - frame_number; 
-                            state = STOP_STATE;
-                            STOP = TRUE;
-                            return bufSize; // Successful write
-                        } else { 
-                            state = START; // Restart the loop for resending
-                        }
-                    } else {
-                        state = START; // Unexpected byte, reset state
-                    }
+                        alarm(0);
+                        alarmEnabled = FALSE;
+                        free(newFrame);
+                        frame_number = 1 - frame_number;
+                        state = STOP_STATE;
+                        STOP = TRUE;
+                        printf("llwrite: Frame acknowledged, transmission successful.\n");
+                        return bufSize; 
                     break;
                 case STOP_STATE:
-                break;
+                    break;
             }
         }
+
         if (alarmCount >= retransmissions) {
             numTimeouts++;
             STOP = TRUE;
-            break; 
+            printf("llwrite: Maximum retransmissions reached, transmission failed.\n");
+            break;
         }
     }
 
-    free(stuffedFrame); 
+        if (reject){
+            initializeAlarm();
+            alarmEnabled = TRUE;
+            alarm(timeout);
+
+            writeBytes((const char *)newFrame, newFrameSize);  
+            numFramesSent++;
+            printf("llwrite: Resending on Start frame, size = %d\n", newFrameSize);
+        }
+
+    free(newFrame);
     return -1;
 }
 
-static int checkBCC2(const unsigned char *data, int length, unsigned char bcc2) {
-    unsigned char calculatedBCC2 = data[0];
-    for (int j = 1; j < length; j++) {
-        calculatedBCC2 ^= data[j];
-    }
-    return calculatedBCC2 == bcc2;
-}
 ////////////////////////////////////////////////
 // LLREAD
 ////////////////////////////////////////////////
@@ -420,90 +444,100 @@ int llread(unsigned char *packet) {
         C_RCV,          
         READING_DATA,   
         DATA_ESCAPED,   
-        STOP_STATE          
+        STOP_STATE      
     } state = START;
     
     unsigned char byte;
     unsigned char controlField;
     int dataIdx = 0;
 
+    printf("llread: Waiting to receive frame...\n");
+
     while (state != STOP_STATE) {
-        if(readByte((char *)&byte)){
-            printf("%X \n", byte);
-            if(state != 0){
-            printf("%d \n", state);
-}
+        if (readByte((char *)&byte)) {
+            printf("llread: Byte received = 0x%02X, current state = %d\n", byte, state);
             switch (state) {
                 case START:
-                    if (byte == FLAG) state = FLAG_RCV; 
+                    if (byte == FLAG) 
+                        state = FLAG_RCV;
                     break;
 
                 case FLAG_RCV:
-                    if (byte == ADDR_RX) {
-                        state = A_RCV;  
+                    if (byte == ADDR_TX) {
+                        state = A_RCV;
                     } else if (byte != FLAG) {
-                        state = START;  
+                        state = START;
                     }
                     break;
 
                 case A_RCV:
                     if (byte == CTRL_I_0 || byte == CTRL_I_1) {
-                        controlField = byte; 
+                        controlField = byte;
                         state = C_RCV;
+                        printf("llread: Control field detected = 0x%02X\n", controlField);
                     } else if (byte == FLAG) {
-                        state = FLAG_RCV; 
+                        state = FLAG_RCV;
                     } else if (byte == CTRL_DISC) {
                         sendDISCFrame();
-                        return 0;  
+                        printf("llread: DISC frame received, closing connection.\n");
+                        return 0;
                     } else {
-                        state = START;  
+                        state = START;
                     }
                     break;
 
                 case C_RCV:
-                    if (byte == (ADDR_RX ^ controlField)) {
-                        state = READING_DATA; 
+                    if (byte == (ADDR_TX ^ controlField)) {
+                        state = READING_DATA;
+                        printf("llread: BCC1 check passed.\n");
                     } else if (byte == FLAG) {
-                        state = FLAG_RCV; 
+                        state = FLAG_RCV;
                     } else {
-                        state = START;  
+                        state = START;
                     }
                     break;
 
                 case READING_DATA:
-                    if (byte == ESC) {
-                        state = DATA_ESCAPED;  
-                    } else if (byte == FLAG) {
-                    
-                        unsigned char bcc2 = packet[dataIdx - 1];
+                    if (byte == FLAG) {
+                        unsigned char bcc2 = packet[dataIdx - 1];  
                         dataIdx--;  
+                        packet[dataIdx] = '\0';  
 
-                        if (checkBCC2(packet, dataIdx, bcc2)) {
-                            sendRRFrame((controlField == CTRL_I_0) ? 0 : 1);
-                            frame_number = 1 - frame_number; 
-                            return dataIdx; 
+                        unsigned char acc = packet[0];  
+                        for (int j = 1; j < dataIdx; j++)
+                            acc ^= packet[j];  
+
+                        if (bcc2 == acc) {
+                            state = STOP_STATE;
+                            sendRRFrame(frame_number);
+                            frame_number = (frame_number + 1) % 2;
+                            return dataIdx;  
                         } else {
-                            sendREJFrame((controlField == CTRL_I_0) ? 0 : 1);
+                            printf("Error: BCC2 check failed, retransmission needed.\n");
+                            sendREJFrame(frame_number);
                             return -1;  
                         }
+                    } else if (byte == ESC) {
+                        state = DATA_ESCAPED;  
                     } else {
-                        packet[dataIdx++] = byte;
+                        packet[dataIdx++] = byte; 
                     }
                     break;
 
                 case DATA_ESCAPED:
-                        //todo
-                    state = READING_DATA;  
-                    if (byte == ESC || byte == FLAG) {
-                        packet[dataIdx++] = byte;  
+                    state = READING_DATA; 
+                    if (byte == (FLAG ^ 0x20)) {
+                        packet[dataIdx++] = FLAG;  
+                    } else if (byte == (ESC ^ 0x20)) {
+                        packet[dataIdx++] = ESC; 
                     } else {
-                        packet[dataIdx++] = ESC;
-                        packet[dataIdx++] = byte;  
+                        packet[dataIdx++] = ESC;  
+                        packet[dataIdx++] = byte; 
                     }
                     break;
 
                 default:
-                    state = START;  
+                    state = START;
                     break;
             }
         }
@@ -514,7 +548,6 @@ int llread(unsigned char *packet) {
 ////////////////////////////////////////////////
 // LLCLOSE
 ////////////////////////////////////////////////
-
 int llclose(int showStatistics) {
 
     if (role == LlTx) {
