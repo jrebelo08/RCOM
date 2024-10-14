@@ -143,13 +143,12 @@ int llOpenRxStateMachine() {
                     state = START;
                 break;
             case BCC_OK:
-                if (buf[0] == FLAG) 
+                if (buf[0] == FLAG){
                     state = STOP_STATE;
-                else
+                    STOP = TRUE;
+                }else{
                     state = START;
-                break;
-            case STOP_STATE:
-                STOP = TRUE;
+                }
                 break;
             }
         }
@@ -176,62 +175,63 @@ int llOpenTxStateMachine() {
     alarmEnabled = TRUE;
 
     while (STOP == FALSE && alarmCount < retransmissions) {
-        int bytes = readByte(buf);
-        if (bytes > 0) {
-            switch (state) {
-            case START:
-                if (buf[0] == FLAG) 
-                    state = FLAG_RCV;
-                break;
-            case FLAG_RCV:
-                if (buf[0] == ADDR_TX) 
-                    state = A_RCV;
-                else if (buf[0] != FLAG)
-                    state = START;
-                break;
-            case A_RCV:
-                if (buf[0] == CTRL_UA) 
-                    state = C_RCV;
-                else if (buf[0] == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-            case C_RCV:
-                if (buf[0] == (ADDR_TX ^ CTRL_UA)) 
-                    state = BCC_OK;
-                else if (buf[0] == FLAG)
-                    state = FLAG_RCV;
-                else
-                    state = START;
-                break;
-            case BCC_OK:
-                if (buf[0] == FLAG) 
-                    state = STOP_STATE;
-                else
-                    state = START;
-                break;
-            case STOP_STATE:
-                STOP = TRUE;
-                alarm(0);
-                alarmEnabled = FALSE;
-                alarmCount = 0;
-                break;
+            if (!alarmEnabled) {
+                alarmCount++;
+                if (alarmCount >= retransmissions) {
+                    numTimeouts++;
+                    return -1; 
+                }
+                sendSETFrame();
+                initializeAlarm();
+                alarm(timeout);
+                alarmEnabled = TRUE; 
+                if(alarmCount > 0){
+                    numRetransmissions++;
+                }
             }
-        } else if (!alarmEnabled) {
-            alarmCount++;
-            if (alarmCount >= retransmissions) {
-                numTimeouts++;
-                return -1; 
-            }
-            sendSETFrame();
-            initializeAlarm();
-            alarm(timeout);
-            alarmEnabled = TRUE; 
-            if(alarmCount > 0){
-                numRetransmissions++;
-            }
-        }
+                int bytes = readByte(buf);
+                if (bytes > 0) {
+                    switch (state) {
+                    case START:
+                        if (buf[0] == FLAG) 
+                            state = FLAG_RCV;
+                        break;
+                    case FLAG_RCV:
+                        if (buf[0] == ADDR_TX) 
+                            state = A_RCV;
+                        else if (buf[0] != FLAG)
+                            state = START;
+                        break;
+                    case A_RCV:
+                        if (buf[0] == CTRL_UA) 
+                            state = C_RCV;
+                        else if (buf[0] == FLAG)
+                            state = FLAG_RCV;
+                        else
+                            state = START;
+                        break;
+                    case C_RCV:
+                        if (buf[0] == (ADDR_TX ^ CTRL_UA)) 
+                            state = BCC_OK;
+                        else if (buf[0] == FLAG)
+                            state = FLAG_RCV;
+                        else
+                            state = START;
+                        break;
+                    case BCC_OK:
+                        printf("%X", buf[0]);
+                        if (buf[0] == FLAG){
+                            state = STOP_STATE;
+                            alarm(0);
+                            alarmEnabled = FALSE;
+                            alarmCount = 0;
+                            STOP = TRUE;
+                        }else{
+                            state = START;
+                        }
+                        break;
+                    }
+                }
     }
     return 1;
 }
@@ -260,9 +260,9 @@ int llopen(LinkLayer connectionParameters)
     return -1;
 }
 
-unsigned char* buildFrame(const unsigned char *buf, int bufSize, int *frameSize) {
-    *frameSize = bufSize + 6;
-    unsigned char *frame = (unsigned char *)malloc(*frameSize);
+unsigned char* buildFrame(const unsigned char *buf, int bufSize) {
+    int frameSize = bufSize + 6;
+    unsigned char *frame = (unsigned char *)malloc(frameSize);
 
     frame[0] = FLAG; // Start flag
     frame[1] = ADDR_TX; // Address field
@@ -274,25 +274,25 @@ unsigned char* buildFrame(const unsigned char *buf, int bufSize, int *frameSize)
         frame[i + 4] = buf[i];
         bcc2 ^= buf[i];
     }
-    frame[bufSize + 4] = bcc2; // BCC2
-    frame[bufSize + 5] = FLAG; // End flag
+    frame[frameSize - 2] = bcc2;
+    frame[frameSize - 1] = FLAG;
 
     return frame;
 }
 
-unsigned char* byteStuffing(const unsigned char *frame, int frameSize, int *stuffedSize) {
+unsigned char* byteStuffing(const unsigned char *frame, int frameSize) {
     unsigned char *stuffedFrame = (unsigned char *)malloc(frameSize * 2); 
-    *stuffedSize = 0;
+    int stuffedSize = 0;
 
     for (int i = 0; i < frameSize; i++) {
         if (frame[i] == FLAG) {
-            stuffedFrame[(*stuffedSize)++] = ESC;
-            stuffedFrame[(*stuffedSize)++] = 0x5e; // FLAG substitution
+            stuffedFrame[(stuffedSize)++] = ESC;
+            stuffedFrame[(stuffedSize)++] = 0x5e; // FLAG substitution
         } else if (frame[i] == ESC) {
-            stuffedFrame[(*stuffedSize)++] = ESC;
-            stuffedFrame[(*stuffedSize)++] = 0x5d; // ESC substitution
+            stuffedFrame[(stuffedSize)++] = ESC;
+            stuffedFrame[(stuffedSize)++] = 0x5d; // ESC substitution
         } else {
-            stuffedFrame[(*stuffedSize)++] = frame[i];
+            stuffedFrame[(stuffedSize)++] = frame[i];
         }
     }
     return stuffedFrame;
@@ -303,18 +303,16 @@ unsigned char* byteStuffing(const unsigned char *frame, int frameSize, int *stuf
 ////////////////////////////////////////////////
 int llwrite(const unsigned char *buf, int bufSize) {
     
-    int frameSize;
-    unsigned char *frame = buildFrame(buf, bufSize, &frameSize);
+    unsigned char *frame = buildFrame(buf, bufSize);
 
-    int stuffedSize;
-    unsigned char *stuffedFrame = byteStuffing(frame, frameSize, &stuffedSize);
+    unsigned char *stuffedFrame = byteStuffing(frame, bufSize + 6);
     free(frame); // Free original frame memory
 
     STOP = FALSE;
 
     while (STOP == FALSE && alarmCount < retransmissions) {
         // Transmit the frame to rx
-        writeBytes((const char *)stuffedFrame, stuffedSize); // Send the stuffed frame
+        writeBytes((const char *)stuffedFrame, sizeof(stuffedFrame)); // Send the stuffed frame
         numFramesSent++;
         initializeAlarm();
         alarm(timeout); 
@@ -325,6 +323,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
         int reject = 0;
 
         if (readByte((char *) &byte) > 0) {
+            printf("%d", state);
             switch (state) {
                 case START:
                     if (byte == FLAG) state = FLAG_RCV;
@@ -379,6 +378,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
                             free(stuffedFrame); 
                             frame_number = 1 - frame_number; 
                             state = STOP_STATE;
+                            STOP = TRUE;
                             return bufSize; // Successful write
                         } else { 
                             state = START; // Restart the loop for resending
@@ -388,7 +388,6 @@ int llwrite(const unsigned char *buf, int bufSize) {
                     }
                     break;
                 case STOP_STATE:
-                    STOP = TRUE;
                 break;
             }
         }
@@ -400,7 +399,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
     }
 
     free(stuffedFrame); 
-    return -1; 
+    return -1;
 }
 
 static int checkBCC2(const unsigned char *data, int length, unsigned char bcc2) {
@@ -430,7 +429,10 @@ int llread(unsigned char *packet) {
 
     while (state != STOP_STATE) {
         if(readByte((char *)&byte)){
-
+            printf("%X \n", byte);
+            if(state != 0){
+            printf("%d \n", state);
+}
             switch (state) {
                 case START:
                     if (byte == FLAG) state = FLAG_RCV; 
@@ -490,6 +492,7 @@ int llread(unsigned char *packet) {
                     break;
 
                 case DATA_ESCAPED:
+                        //todo
                     state = READING_DATA;  
                     if (byte == ESC || byte == FLAG) {
                         packet[dataIdx++] = byte;  
