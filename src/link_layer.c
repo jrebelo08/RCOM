@@ -56,7 +56,7 @@ void initializeAlarm() {
 }
 
 void handleAlarm() {
-    alarmCount++;
+    // alarmCount++;
     if (alarmCount >= retransmissions) {
         numTimeouts++;
     }
@@ -218,9 +218,13 @@ int llopen(LinkLayer connectionParameters) {
 
 
 int handleLlwriteStateTransition(LinkLayerState *state, unsigned char byte, unsigned char *cField) {
+    int reject = 0;
     switch (*state) {
         case START:
-            if (byte == FLAG) *state = FLAG_RCV;
+            if (byte == FLAG){ *state = FLAG_RCV;}
+            else{
+                printf("%X \n", byte);
+            }
             break;
         case FLAG_RCV:
             if (byte == ADDR_TX) *state = A_RCV;
@@ -234,9 +238,11 @@ int handleLlwriteStateTransition(LinkLayerState *state, unsigned char byte, unsi
                 *state = C_RCV;
                 *cField = CTRL_RR1;
             } else if (byte == CTRL_REJ0 && frame_number == 0) {
-                *state = START;
+                *state = C_RCV;
+                reject = 1;
             } else if (byte == CTRL_REJ1 && frame_number == 1) {
-                *state = START;
+                *state = C_RCV;
+                reject = 1;
             } else if (byte == CTRL_DISC) {
                 *state = C_RCV;
                 *cField = CTRL_DISC;
@@ -247,13 +253,14 @@ int handleLlwriteStateTransition(LinkLayerState *state, unsigned char byte, unsi
             }
             break;
         case C_RCV:
-            if (byte == (ADDR_TX ^ *cField)) {
+            if (byte == (ADDR_TX ^ *cField) && reject != 1) {
                 *state = BCC_OK;
             } else if (byte == FLAG) {
                 *state = FLAG_RCV;
             } else {
                 *state = START;
             }
+            reject = 0;
             break;
         case BCC_OK:
             return 1; 
@@ -349,7 +356,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
             }
             writeBytes((const char *)newFrame, newFrameSize);
             numFramesSent++;
-            printf("llwrite: Retransmitted frame, size = %d\n", newFrameSize);
+            printf("llwrite: Retransmitted frame, size = %d, frame_number = %d\n", newFrameSize, frame_number);
         }
 
         if (readByte((char *)&byte) > 0) {
