@@ -217,7 +217,7 @@ int llopen(LinkLayer connectionParameters) {
 }
 
 
-int handleLlwriteStateTransition(LinkLayerState *state, unsigned char byte, unsigned char *cField, int *reject) {
+int handleLlwriteStateTransition(LinkLayerState *state, unsigned char byte, unsigned char *cField) {
     switch (*state) {
         case START:
             if (byte == FLAG) *state = FLAG_RCV;
@@ -227,9 +227,19 @@ int handleLlwriteStateTransition(LinkLayerState *state, unsigned char byte, unsi
             else if (byte != FLAG) *state = START;
             break;
         case A_RCV:
-            if (byte == CTRL_RR0 || byte == CTRL_RR1 || byte == CTRL_REJ0 || byte == CTRL_REJ1 || byte == CTRL_DISC) {
+            if (byte == CTRL_RR0 && frame_number == 1) {
                 *state = C_RCV;
-                *cField = byte;
+                *cField = CTRL_RR0;
+            } else if (byte == CTRL_RR1 && frame_number == 0) {
+                *state = C_RCV;
+                *cField = CTRL_RR1;
+            } else if (byte == CTRL_REJ0 && frame_number == 0) {
+                *state = START;
+            } else if (byte == CTRL_REJ1 && frame_number == 1) {
+                *state = START;
+            } else if (byte == CTRL_DISC) {
+                *state = C_RCV;
+                *cField = CTRL_DISC;
             } else if (byte == FLAG) {
                 *state = FLAG_RCV;
             } else {
@@ -239,7 +249,6 @@ int handleLlwriteStateTransition(LinkLayerState *state, unsigned char byte, unsi
         case C_RCV:
             if (byte == (ADDR_TX ^ *cField)) {
                 *state = BCC_OK;
-                *reject = (byte == CTRL_REJ0 || byte == CTRL_REJ1) ? 1 : 0;
             } else if (byte == FLAG) {
                 *state = FLAG_RCV;
             } else {
@@ -310,7 +319,6 @@ unsigned char* byteStuffing(const unsigned char *oldFrame, int oldFrameSize, int
 ////////////////////////////////////////////////
 int llwrite(const unsigned char *buf, int bufSize) {
     LinkLayerState state = START;
-    int reject = 0;
     unsigned char byte;
     unsigned char cField;
 
@@ -346,7 +354,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
 
         if (readByte((char *)&byte) > 0) {
             printf("llwrite: Byte received = 0x%02X, current state = %d\n", byte, state);
-            if (handleLlwriteStateTransition(&state, byte, &cField, &reject)) {
+            if (handleLlwriteStateTransition(&state, byte, &cField)) {
                 alarm(0);
                 alarmEnabled = FALSE;
                 free(newFrame);
@@ -362,13 +370,6 @@ int llwrite(const unsigned char *buf, int bufSize) {
             printf("llwrite: Maximum retransmissions reached, transmission failed.\n");
             break;
         }
-    }
-
-    if (reject) {
-        handleAlarm();
-        writeBytes((const char *)newFrame, newFrameSize);
-        numFramesSent++;
-        printf("llwrite: Resending on Start frame, size = %d\n", newFrameSize);
     }
 
     free(newFrame);
@@ -454,12 +455,12 @@ int llread(unsigned char *packet) {
 
                         if (bcc2 == acc) {
                             state = STOP_STATE;
-                            sendRRFrame(frame_number);
+                            sendRRFrame(frame_number == 0 ? 1 : 0);
                             frame_number = (frame_number + 1) % 2;
                             return dataIdx;  
                         } else {
                             printf("Error: BCC2 check failed, retransmission needed.\n");
-                            sendREJFrame(frame_number);
+                            sendREJFrame(frame_number == 0 ? 0 : 1);
                             return -1;  
                         }
                     } else if (byte == ESC) {
