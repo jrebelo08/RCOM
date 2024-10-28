@@ -1,12 +1,3 @@
-// Application layer protocol implementation
-
-#include <fcntl.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 #include "../include/application_layer.h"
 #include "../include/link_layer.h"
 
@@ -14,166 +5,165 @@
 #define C_START 2
 #define C_END 3
 
-void applicationLayer(const char *serialPort, const char *role, int baudRate,
-                      int nTries, int timeout, const char *filename)
-{
-    if (strcmp(role, "tx") == 0) {
+// Helper function to initialize link layer connection parameters
+LinkLayer initializeLinkLayer(const char* serialPort, LinkLayerRole role, int baudRate, int nTries, int timeout) {
+    LinkLayer connectionParams;
+    strncpy(connectionParams.serialPort, serialPort, sizeof(connectionParams.serialPort) - 1);
+    connectionParams.serialPort[sizeof(connectionParams.serialPort) - 1] = '\0';
+    connectionParams.role = role;
+    connectionParams.baudRate = baudRate;
+    connectionParams.nRetransmissions = nTries;
+    connectionParams.timeout = timeout;
+    return connectionParams;
+}
+
+// Helper function to construct START or END control packets
+unsigned char* constructControlPacket(unsigned char controlType, unsigned long fileSize) {
+    unsigned char* controlPacket = (unsigned char*) calloc(11, sizeof(unsigned char));
+    controlPacket[0] = controlType;
+    controlPacket[1] = 0; // File size TLV type
+    controlPacket[2] = 8; // File size length
+
+    for (int i = 0; i < 8; i++) {
+        controlPacket[10 - i] = (unsigned char)(fileSize & 0xFF);
+        fileSize >>= 8;
+    }
+    return controlPacket;
+}
+
+// Transmitter: sends data in packets along with START and END control packets
+void transmitFileData(int fd, unsigned long fileSize) {
+    unsigned char* startPacket = constructControlPacket(C_START, fileSize);
+    if (llwrite(startPacket, 11) == -1) {
+        perror("Error sending START packet");
+        free(startPacket);
+        return;
+    }
+    free(startPacket);
+
+    unsigned char* dataPacket = (unsigned char*) calloc(MAX_PAYLOAD_SIZE, sizeof(unsigned char));
+    unsigned int maxDataSize = MAX_PAYLOAD_SIZE - 3;
+    unsigned long bytesRemaining = fileSize;
+
+    while (bytesRemaining > 0) {
+        unsigned int chunkSize = (bytesRemaining < maxDataSize) ? bytesRemaining : maxDataSize;
+
+        dataPacket[0] = C_DATA;
+        dataPacket[1] = (chunkSize >> 8) & 0xFF;
+        dataPacket[2] = chunkSize & 0xFF;
+
+        if (read(fd, dataPacket + 3, chunkSize) < chunkSize) {
+            perror("Error reading from file");
+            break;
+        }
+
+        if (llwrite(dataPacket, chunkSize + 3) != (int)(chunkSize + 3)) {
+            perror("Error sending data packet");
+            break;
+        }
+
+        printf("Sent data packet of size %u bytes\n", chunkSize);
+        bytesRemaining -= chunkSize;
+    }
+
+    free(dataPacket);
+
+    unsigned char* endPacket = constructControlPacket(C_END, fileSize);
+    if (llwrite(endPacket, 11) == -1) {
+        perror("Error sending END packet");
+    }
+    free(endPacket);
+}
+
+// Receiver: receives data packets and saves them to a file
+int receiveFileData(int fd) {
+    unsigned char* buffer = (unsigned char*) calloc(MAX_PAYLOAD_SIZE, sizeof(unsigned char));
+
+    // Receive and parse START packet
+    if (llread(buffer) == -1 || buffer[0] != C_START) {
+        perror("Error receiving START packet");
+        free(buffer);
+        return -1;
+    }
+
+    unsigned long expectedFileSize = 0;
+    for (int i = 3; i < 11; i++) {
+        expectedFileSize = (expectedFileSize << 8) | buffer[i];
+    }
+
+    unsigned long receivedBytes = 0;
+    while (1) {
+        if (llread(buffer) == -1) {
+            perror("Error receiving data packet, retrying...");
+            continue;
+        }
+        if (buffer[0] == C_END) break;
+
+        unsigned int packetSize = (buffer[1] << 8) | buffer[2];
+        if (write(fd, buffer + 3, packetSize) != (ssize_t) packetSize) {
+            perror("Error writing data to file");
+            break;
+        }
+
+        receivedBytes += packetSize;
+        printf("Received and wrote %u bytes of data\n", packetSize);
+    }
+
+    // Validate END packet's file size
+    unsigned long endFileSize = 0;
+    for (int i = 3; i < 11; i++) {
+        endFileSize = (endFileSize << 8) | buffer[i];
+    }
+
+    free(buffer);
+    return (expectedFileSize == endFileSize) ? 0 : -1;
+}
+
+// Main application layer function to handle transmitter and receiver roles
+void applicationLayer(const char *serialPort, const char *role, int baudRate, int nTries, int timeout, const char *filename) {
+    LinkLayerRole appRole = (strcmp(role, "tx") == 0) ? LlTx : LlRx;
+    LinkLayer connectionParams = initializeLinkLayer(serialPort, appRole, baudRate, nTries, timeout);
+
+    if (llopen(connectionParams) == -1) {
+        perror("Failed to open link layer connection");
+        return;
+    }
+
+    if (appRole == LlTx) {
         int fd = open(filename, O_RDONLY);
         if (fd == -1) {
-            printf("Error opening \"%s\".\n", filename);
+            perror("Error opening file for transmission");
             return;
         }
 
-        struct stat st;
-        stat(filename, &st);
-        unsigned long size = (unsigned long) st.st_size;
-
-        unsigned char *control_packet = (unsigned char*) malloc (11);
-        control_packet[0] = C_START;
-        control_packet[1] = 0;
-        control_packet[2] = 8;
-
-        unsigned long size_aux = size;
-        for (int i = 7; i >= 0; i--) {
-            control_packet[i + 3] = (unsigned char) (0xff & size_aux);
-            size_aux >>= 8;
-        }
-
-        LinkLayer connectionParameters;
-
-        LinkLayerRole role = LlTx;
-        strcpy(connectionParameters.serialPort, serialPort);
-        connectionParameters.role = role;
-        connectionParameters.baudRate = baudRate;
-        connectionParameters.nRetransmissions = nTries;
-        connectionParameters.timeout = timeout;
-
-        if (llopen(connectionParameters) == -1) {
-            printf("Error setting connection.\n");
-            return;
-        }
-        printf("\nTransmition Started\n\n");
-
-        if (llwrite(control_packet, 11) == -1) {
-            printf("Error transmitting information.\n");
+        struct stat fileStats;
+        if (fstat(fd, &fileStats) == -1) {
+            perror("Error obtaining file statistics");
+            close(fd);
             return;
         }
 
-        unsigned long left = size;
-
-        unsigned char* data_packet = (unsigned char*) malloc (MAX_PAYLOAD_SIZE);
-        unsigned int line_size = MAX_PAYLOAD_SIZE - 3;
-
-        while (left > 0) {
-            if (left <= line_size) line_size = left;
-
-            data_packet[0] = C_DATA;
-            data_packet[2] = (unsigned char) (0xff & (line_size));
-            data_packet[1] = (unsigned char) (0xff & ((line_size) >> 8));
-            
-            read(fd, data_packet + 3, line_size);
-
-            if (llwrite(data_packet, line_size + 3) != line_size + 3) {
-                printf("Error transmitting information.\n");
-                return;
-            }
-            printf("Answer Received.\n");
-
-            left -= line_size;
-        }
-
-        free(data_packet);
-
-        control_packet[0] = C_END;
-        if (llwrite(control_packet, 11) == -1) {
-            printf("Error transmitting information.\n");
-            return;
-        }
-        free(control_packet);
-
-        while (llclose(0) == -1) {
-            printf("Error closing connection.\n");
-            return;
-        }
-
+        printf("Starting file transmission...\n");
+        transmitFileData(fd, (unsigned long) fileStats.st_size);
         close(fd);
 
-    } else if (strcmp(role, "rx") == 0) {
-        int fd;
-        int fd_temp = open(filename, O_WRONLY | O_TRUNC);
-        if(fd_temp == -1)
-            fd = open(filename, O_APPEND | O_CREAT | O_WRONLY);
-        else {
-            write(fd_temp, "", 0);
-            close(fd_temp);
-            fd = open(filename, O_APPEND | O_WRONLY);
-        }
+    } else {
+        int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
         if (fd == -1) {
-            printf("Error opening \"%s\".\n", filename);
-            return;
-        }
-        LinkLayer connectionParameters;
-
-        LinkLayerRole role = LlRx;
-        strcpy(connectionParameters.serialPort, serialPort);
-        connectionParameters.role = role;
-        connectionParameters.baudRate = baudRate;
-        connectionParameters.nRetransmissions = nTries;
-        connectionParameters.timeout = timeout;
-
-        if (llopen(connectionParameters) == -1) {
-            printf("Error setting connection.\n");
-            return;
-        }
-        printf("\nTransmition Started\n\n");
-
-        unsigned char* buffer = (unsigned char*) malloc (MAX_PAYLOAD_SIZE);
-        if(llread(buffer) == -1) {
-            printf("Error receiving information.\n");
-            return;
-        }
-        printf("Packet Received\n");
-
-        unsigned long size = 0;
-        for (int i = 0; i < 8; i++) {
-            size <<= 8;
-            size += buffer[i + 3];
-        }
-
-        while(1) {
-            if(llread(buffer) == -1) {
-                continue;
-            }
-            if(buffer[0] != C_DATA) break;
-            unsigned int current_size = buffer[1];
-            current_size <<= 8;
-            current_size += buffer[2];
-            
-            write(fd, buffer + 3, current_size);
-            printf("Packet Received \n");
-        }
-
-        if(buffer[0] != C_END) {
-            printf("Error receiving information(C_END).\n");
+            perror("Error opening file for reception");
             return;
         }
 
-        unsigned long new_size = 0;
-        for(int i = 0; i < 8; i++){
-            new_size <<= 8;
-            new_size += buffer[i + 3];
+        printf("Starting file reception...\n");
+        if (receiveFileData(fd) == -1) {
+            perror("File reception failed");
         }
-        if(new_size != size) {
-            printf("Error receiving information(size).\n");
-            return;
-        }
-
-        free(buffer);
-
-        while(llclose(0) == -1);
         close(fd);
-        
     }
-    
-    printf("\nTransmition Ended Sucessfully\n");
+
+    if (llclose(0) == -1) {
+        perror("Error closing link layer connection");
+    }
+
+    printf("Transmission completed successfully.\n");
 }
