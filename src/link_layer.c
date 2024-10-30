@@ -37,7 +37,9 @@ int timeout = 0;
 int retransmissions = 0;
 static int numFramesSent = 0;
 static int numRetransmissions = 0;
-static int numTimeouts = 0;
+static numFramesReceived = 0;
+static numFramesAcknowledged = 0;
+static numFramesRejected = 0;
 
 void alarmHandler(int signal)
 {
@@ -56,10 +58,6 @@ void initializeAlarm() {
 }
 
 void handleAlarm() {
-    // alarmCount++;
-    if (alarmCount >= retransmissions) {
-        numTimeouts++;
-    }
     initializeAlarm();
     alarm(timeout);
     alarmEnabled = TRUE;
@@ -96,6 +94,7 @@ void sendDISCFrame() {
 }
 
 void sendRRFrame(int seq) {
+    numFramesAcknowledged++;
     if (seq == 0) {
         sendFrame(CTRL_RR0, "RR0");
     } else if (seq == 1) {
@@ -104,6 +103,7 @@ void sendRRFrame(int seq) {
 }
 
 void sendREJFrame(int seq) {
+    numFramesRejected++;
     if (seq == 0) {
         sendFrame(CTRL_REJ0, "REJ0");
     } else if (seq == 1) {
@@ -368,6 +368,7 @@ int llwrite(const unsigned char *buf, int bufSize) {
                 frame_number = 1 - frame_number;
                 STOP = TRUE;
                 printf("llwrite: Frame acknowledged, transmission successful.\n");
+                alarmCount = 0;
                 return bufSize;
             }
         }
@@ -461,6 +462,7 @@ int llread(unsigned char *packet) {
                             state = STOP_STATE;
                             sendRRFrame(frame_number == 0 ? 1 : 0);
                             frame_number = (frame_number + 1) % 2;
+                            numFramesReceived++;
                             return dataIdx;  
                         } else {
                             printf("Error: BCC2 check failed, retransmission needed.\n");
@@ -572,9 +574,17 @@ int llclose(int showStatistics) {
 
     if (showStatistics) {
         printf("Statistics:\n");
-        printf("Frames Sent: %d\n", numFramesSent);
-        printf("Retransmissions: %d\n", numRetransmissions);
-        printf("Timeouts: %d\n", numTimeouts);
+        if(role == LlRx)
+            printf("Frames Sent: %d\n", numFramesSent);
+        if(role == LlTx)
+            printf("Frames Sent: %d\n", numFramesSent - 1);
+        if(role == LlTx)
+            printf("Retransmissions: %d\n", numRetransmissions);
+        if(role == LlRx){
+            printf("Information Frames Received: %d\n", numFramesReceived);
+            printf("Information Frames Acknowledged: %d\n", numFramesAcknowledged);
+            printf("Information Frames Rejected: %d\n", numFramesRejected);
+        }
     }
 
     return 1;
